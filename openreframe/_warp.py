@@ -35,21 +35,44 @@ def build_intrinsics(w: int, h: int, fov_h_deg: float = FOV_H_DEG) -> np.ndarray
     return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
 
 
-def depth_rel_to_pseudo_z(d_rel: np.ndarray | torch.Tensor) -> torch.Tensor:
-    """Relative depth (higher=closer, DA-V2 convention) -> unitless pseudo-depth."""
+def depth_rel_to_pseudo_z(d_rel: np.ndarray | torch.Tensor,
+                          lo_pct: float = 1.0, hi_pct: float = 99.0,
+                          eps: float = 0.05) -> torch.Tensor:
+    """Relative depth (higher=closer, DA-V2) -> unitless pseudo-depth.
+
+    Three robustness measures, all of which the original formula lacked:
+
+    - Range clipping from percentiles rather than min/max. Relative-depth
+      checkpoints emit isolated outlier pixels; min/max normalisation lets a
+      handful of them stretch the range and squash all real structure.
+    - A *bounded* `eps` (0.05, was 1e-3). `1/(dn + eps)` is unbounded as
+      eps -> 0, so a pixel with dn ~= 0 reached z = 544 against a median of
+      1.0 and dominated the reprojection.
+    - The scale is anchored on the median depth of the scene's **near half**
+      (`dn > median(dn)`), not on the median of z itself. On images where far
+      field saturates -- e.g. mix01.jpg, where ~50% of pixels sit at dn ~= 0 --
+      the median of z lands inside the sky plateau, so median normalisation
+      rescales the entire foreground to a near-zero depth and it collapses to
+      the principal point. Anchoring on the near half is always well defined
+      and keeps a bounded ~1/eps dynamic range.
+    """
     if isinstance(d_rel, torch.Tensor):
         d = d_rel.detach().float().cpu()
     else:
         d = torch.from_numpy(np.asarray(d_rel, dtype=np.float32))
     d = torch.nan_to_num(d, nan=0.0, posinf=float(d.max() if d.numel() else 1.0),
                          neginf=0.0)
-    dmin, dmax = d.min(), d.max()
-    if not torch.isfinite(dmin) or dmax - dmin < EPS_Z:
+    flat = d.flatten().float()
+    lo = torch.quantile(flat, lo_pct / 100.0)
+    hi = torch.quantile(flat, hi_pct / 100.0)
+    if not torch.isfinite(lo) or not torch.isfinite(hi) or hi - lo < EPS_Z:
         return torch.ones_like(d)
-    dn = (d - dmin) / (dmax - dmin)
-    z = 1.0 / (dn + 1e-3)
-    z = z / z.median().clamp_min(EPS_Z)
-    return z
+    dn = ((d - lo) / (hi - lo)).clamp(0.0, 1.0)
+    z = 1.0 / (dn + eps)
+
+    near = dn > dn.median()
+    anchor = z[near].median() if bool(near.any()) else z.median()
+    return z / anchor.clamp_min(EPS_Z)
 
 
 def slider_to_center(t_norm: tuple[float, float, float],
@@ -142,7 +165,8 @@ def forward_warp(rgb: torch.Tensor, z: torch.Tensor, K: np.ndarray,
 
 
 def classify_holes(coverage: np.ndarray, flow_med_px: float,
-                   min_inscribed_radius: float = 3.0
+                   min_inscribed_radius: float = 3.0,
+                   min_component_area: int | None = None
                    ) -> tuple[np.ndarray, np.ndarray]:
     """Split splat holes into (a) magnification speckle/thin stripes ->
     filled but unmasked, and (b) thick true-disocclusion regions -> binary
@@ -150,14 +174,22 @@ def classify_holes(coverage: np.ndarray, flow_med_px: float,
 
     Thickness, not raw area, separates them: undersampling leaves 1-2 px wide
     stripes whose connected components percolate across the frame, while real
-    disocclusion crescents are many pixels thick. An area threshold is useless
-    here because percolation makes stripe components arbitrarily large.
+    disocclusion crescents are many pixels thick. An area threshold alone is
+    useless here because percolation makes stripe components arbitrarily large.
 
     The thickness test is per connected component: a component survives when its
     largest inscribed radius reaches `min_inscribed_radius`, and then the WHOLE
     component is kept. Keeping only the eroded core would discard the boundary
     shell -- exactly the seam-prone ring that inpainting has to own -- so the
     core is used only to decide membership, never as the mask extent.
+
+    `min_component_area` is a *second*, independent cleanup, applied after
+    thickness has made the primary decision. A splat at real-photo
+    displacements punches out hundreds to thousands of small isolated holes
+    wherever depth is locally inconsistent; inpainting each one separately
+    makes the diffusion model emit a flat blob per component (observed as
+    scattered grey cubes). Specks below the floor are nearest-winner filled
+    instead of inpainted.
     """
     from scipy import ndimage
 
@@ -167,12 +199,19 @@ def classify_holes(coverage: np.ndarray, flow_med_px: float,
     holes_for_mask = (~closed.astype(bool)).astype(np.uint8)
     raw_holes = (~coverage.astype(bool)).astype(np.uint8)
 
+    h, w = raw_holes.shape
+    if min_component_area is None:
+        min_component_area = int(max(64, 3.0e-4 * h * w))
+
     n, labels = cv2.connectedComponents(holes_for_mask, connectivity=8)
     thick = np.zeros_like(holes_for_mask)
     if n > 1:
         dist = cv2.distanceTransform(holes_for_mask, cv2.DIST_L2, 5)
         radii = ndimage.maximum(dist, labels, index=np.arange(1, n))
-        keep = np.flatnonzero(radii >= min_inscribed_radius) + 1
+        areas = ndimage.sum_labels(np.ones_like(holes_for_mask), labels,
+                                   index=np.arange(1, n))
+        keep = (radii >= min_inscribed_radius) & (areas >= min_component_area)
+        keep = np.flatnonzero(keep) + 1
         if keep.size:
             thick[np.isin(labels, keep)] = 1
 

@@ -62,7 +62,11 @@ def run(variant: str, use_slice: bool) -> None:
         pipe.scheduler = __import__("diffusers").DPMSolverMultistepScheduler.from_config(
             pipe.scheduler.config, use_karras_sigmas=True, algorithm_type="dpmsolver++")
         pipe.enable_model_cpu_offload()
-        pipe.enable_vae_tiling()
+        # SDXL pipelines do not expose enable_vae_tiling (their VAE is a
+        # different implementation), so guard every optional memory knob.
+        for opt in ("enable_vae_tiling", "enable_vae_slicing"):
+            if hasattr(pipe, opt):
+                getattr(pipe, opt)()
         if use_slice:
             pipe.enable_attention_slicing("auto")
 

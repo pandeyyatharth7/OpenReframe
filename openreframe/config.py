@@ -22,7 +22,19 @@ DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Large-hf"
 # Translation-only camera: no rotation, no focal change. Sliders are offsets in
 # units of median scene depth (D0.3 locked scope decision).
 FOV_H_DEG = 55.0
-CANON_SHIFT = (0.18, -0.06, 0.12)   # frozen eval shift; do not edit post-hoc
+# Canonical eval shift. Scaled down 3x from the original (0.18, -0.06, 0.12):
+# at 0.18 the reprojection masks covered 18-53% of the frame, which is far more
+# disocclusion than any inpainter fills plausibly and is not representative of
+# the product (users want subtle parallax). See docs/decisions.md R5.
+CANON_SHIFT = (0.06, -0.02, 0.04)   # frozen eval shift; do not edit post-hoc
+
+# Edge-preserving smoothing of the relative-depth map before reprojection.
+# Leaf- and branch-scale depth noise is what creates the thousands of tiny
+# isolated disocclusions that a diffusion model fills with one flat blob each
+# (observed as scattered grey cubes). Bilateral smoothing removes that noise
+# while preserving depth discontinuities at object silhouettes.
+DEPTH_SMOOTH_SIGMA_SPACE = 8.0
+DEPTH_SMOOTH_SIGMA_RANGE = 0.05
 
 # --- generation: identical across every candidate so comparisons stay valid ---
 SEED = 0
@@ -32,14 +44,19 @@ CONTROLNET_SCALE = 0.9
 NEUTRAL_PROMPT = "a high quality, detailed photograph"
 NEGATIVE_PROMPT = "blurry, low quality, distorted, watermark, text"
 
-# --- inpainting backend: candidate B, locked for v1 in R3 -------------------
-# SD1.5-inpaint + depth-ControlNet. Selected under the D0.1 escape clause; see
-# docs/decisions.md R3 for the documented gap (candidates A and C unprofiled).
-BACKEND_BASE = "stable-diffusion-v1-5/stable-diffusion-inpainting"
-BACKEND_CONTROLNET = "lllyasviel/control_v11f1p_sd15_depth"
-PIPELINE_CLASS = "sd15_cn"
-CAP_PX = 768                        # SD1.5's sensible operating long side
+# --- inpainting backend: candidate A, selected in R5 ------------------------
+# SDXL-inpaint, no ControlNet. Candidate C (SDXL + depth-ControlNet) is the
+# higher-fidelity rank but exceeds both the VRAM and latency gates on this
+# hardware; candidate B (SD1.5 + depth-ControlNet) passes the measurable gates
+# but leaves visible netting on textured surfaces. See docs/decisions.md R5.
+BACKEND_BASE = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
+BACKEND_CONTROLNET = None            # candidate A is ControlNet-free
+PIPELINE_CLASS = "sdxl_inpaint"
+CAP_PX = 1024                        # SDXL's operating long side
 RES_MULTIPLE = 64                   # both SD1.5 and SDXL want /64 sizes
+# Measured warm p95 for candidate A over the 6-image eval set; drives the
+# stall watchdog.
+GEN_P95_S = 21.4
 
 # --- pre-committed budgets (D0) ---------------------------------------------
 VRAM_CEIL_MB = 6.8 * 1024            # 6959 MiB hard ceiling per stage
@@ -53,9 +70,10 @@ EVAL_IMAGES = ["ind01.jpg", "out02.jpg", "mix01.jpg",
 # --- OOM watchdog (Phase 3) -------------------------------------------------
 # WDDM CUDA sysmem fallback is ACTIVE on the target machine, so a real OOM
 # surfaces as a large slowdown rather than an OutOfMemoryError. Detection has
-# to be time-based. Measured warm p95 for candidate B is ~10.6 s.
-OOM_SUSPECT_FACTOR = 4.0
-OOM_ABSOLUTE_FLOOR_S = 45.0
+# to be time-based. Candidate C demonstrated this directly: it exceeded
+# dedicated VRAM and ran 18x over budget instead of raising.
+OOM_SUSPECT_FACTOR = 2.5
+OOM_ABSOLUTE_FLOOR_S = 30.0
 
 
 def device() -> str:

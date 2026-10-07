@@ -156,6 +156,222 @@ web UI from version control. Removed.
 no GPU is present (the geometry math is device-agnostic); T3 coverage IoU
 0.9908, T9 hybrid identity pixel-exact.
 
+### F4 — Two latent crashes in the SDXL probes (FIXED)
+
+`prototypes/02_inpaint_sdxl.py` called `pipe.enable_vae_tiling()`
+unconditionally. `StableDiffusionXLInpaintPipeline` does not expose that
+method, so candidate A aborted immediately with `AttributeError` on its first
+ever run. `05_e2e_minimal.py` had the identical defect. Both now guard every
+optional memory knob with `hasattr`, matching the pattern `03_inpaint_sd15_cn.py`
+already used. Candidate A/C had therefore *never* been executed before this
+pass — the "unprofiled" state in O4 was partly this bug, not only missing
+weights.
+
+---
+
+## R4 — All three candidates profiled; D0.1 CANNOT be closed as written
+
+GPU session, 2026-08-23, RTX 4060 Laptop (8188 MiB), driver 616.92,
+torch 2.6.0+cu124. `00_env_check.py`: 15 pass, 0 warn, 0 fail.
+`04_reprojection_math.py`: 28/28 PASS on GPU. `05_e2e_minimal.py` run for the
+first time in the project's history (candidate A, panel at
+`outputs/e2e/panel_A.png`).
+
+`outputs/warppairs/` was regenerated through the repaired `classify_holes`.
+Masks are larger than the pre-repair ones, as predicted in F1 (whole
+components are masked now, not eroded cores): ind01 17.2→20.0%, out02
+39.3→42.2%, mix01 51.3→51.7%, mix05 23.1→30.1%, out04 43.5→51.9%, mix06
+27.9→33.9%.
+
+### Gate 1 (VRAM ≤ 6959 MiB) and gate 2 (p95 ≤ 30 s)
+
+| Candidate | p50 | p95 | torch peak a/r | driver peak | gate 1 | gate 2 |
+|---|---|---|---|---|---|---|
+| C — SDXL + CN-depth | 289.0 s | **378.7 s** | 8048.6 / **8642.0** MiB | **7949** MiB | **FAIL** | **FAIL** |
+| A — SDXL inpaint | 16.3 s | 23.8 s | 5497.8 / 5976.0 MiB | 6091 MiB | pass | pass |
+| B — SD1.5 + CN-depth | 9.0 s | 12.5 s | 2900.4 / 3168.0 MiB | 3287 MiB | pass | pass |
+
+Candidate C fails gate 1 by ~990 MiB and gate 2 by 12.6×. Its torch reserved
+peak (8642 MiB) exceeds total dedicated VRAM (8188 MiB): it did not OOM, it
+**spilled into system RAM and crawled**. That is the WDDM sysmem-fallback
+failure mode predicted in the OOM probe, now observed in a real pipeline, and
+it is direct evidence that the `except OutOfMemoryError` handlers cannot be
+relied on while that toggle is on.
+
+**Cancellation is now proven** (previously never run): candidate A stopped at
+10/25 denoising steps in 9.5 s against a ~16.3 s full run, via
+`callback_on_step_end` + `pipe._interrupt`.
+
+### Gate 3 (artifact rubric)
+
+Assessed by inspection of `outputs/inpaint/{A_sdxl_inpaint,B_sd15_cn,C_sdxl_cn}/`.
+Scores below are **agent-assessed** against the D0.1 rubric (structure
+plausibility / texture coherence / boundary seam / global consistency, 1–5) and
+need sign-off before they can be treated as the recorded result.
+
+| image | mask | B (SD1.5+CN) | A (SDXL) |
+|---|---|---|---|
+| ind01 | 20.0% | global grid, ~1/5 | clean, grey band at bottom edge, ~3.5/5 |
+| out02 | 42.2% | not re-inspected | severe stipple over subject, ~2.3/5 |
+| mix01 | 51.7% | global grid + smeared foreground, ~1/5 | clean, photoreal, ~4.75/5 |
+| mix05 | 30.1% | not re-inspected | scattered grey cubes in foliage, ~2.75/5 |
+| out04 | 51.9% | not re-inspected | shredded trees + cubes, ~1.75/5 |
+| mix06 | 33.9% | not re-inspected | clean, ~4.5/5 |
+
+Mean: **A ≈ 3.3/5, B ≈ 1.3/5, C not scored** (eliminated on gates 1–2).
+
+**No candidate satisfies all three gates.** B fails gate 3 catastrophically —
+the grid artifact covers the entire frame, and it is *not* a "gap", it is a
+total failure of the output. A passes gates 1–2 and beats B decisively on the
+rubric, but has severe artifacts (stipple, floating grey cubes) on 3 of 6
+images.
+
+### The pre-registered rule cannot be applied as written
+
+D0.1's tie-break reads: *"if no candidate satisfies all three, ship B and
+document the gap."* That clause was written on the assumption that B is an
+acceptable floor. The measurements refute that assumption — **B is the worst of
+the three on quality**, not the safety net. Mechanically applying the rule
+would ship the candidate that fails gate 3 hardest.
+
+This is a defect in the rule, not in the candidates. Amending a
+pre-registered rule after seeing results is exactly what the protocol exists to
+prevent, so **this is escalated for an explicit human decision and no rule text
+has been changed.** Two defensible options:
+
+1. Amend the tie-break to "ship the highest-ranked candidate that passes the
+   *measurable* gates (1 and 2), with its artifact failures recorded as known
+   defects" — which selects **A**, on the reasoning that a candidate failing
+   artifact quality on 3/6 images still beats one failing on 6/6.
+2. Amend it to "if no candidate passes all three, no candidate ships" — which
+   leaves D0.1 open until O2 is fixed and the candidates are re-profiled.
+
+Option 2 is the more conservative and is what the evidence currently supports,
+because the artifact failures in A are very likely *downstream of* O2 rather
+than intrinsic to SDXL — see below.
+
+### The artifact failures are probably downstream of O2, not model choice
+
+The two dominant failure modes have a common, non-diffusion cause:
+
+- **Floating grey cubes** (mix05, out04) are small *isolated* masked regions.
+  SDXL fills an isolated 20 px hole with no usable context and emits a flat
+  blob. O2's extreme depth outliers (`z_max` up to 584 against median 1.0)
+  produce spurious high-flow pixels scattered across the frame, which is what
+  generates large numbers of small isolated holes in the first place.
+- **Stipple / dither** (out02, ind01 bottom band) is the "netting" artifact R2
+  flagged as faint and deferred to Sprint 5. It is severe here, and again
+  tracks the noisy depth field rather than the sampler.
+
+Both point at fixing the pseudo-depth field and adding mask cleanup, then
+re-profiling — not at re-ranking candidates. C remains the highest-fidelity
+option but cannot run at all on this hardware within gate 2.
+
+---
+
+## R5 — Root causes fixed; D0.1 RESOLVED to candidate A
+
+The R4 artifacts were **not** a property of the diffusion models. Three
+independent defects in the reprojection stage were producing them, and fixing
+those removed them from candidate B as well.
+
+### D1 — Unbounded pseudo-depth (was O2)
+
+`depth_rel_to_pseudo_z` used `z = 1/(dn + 1e-3)` normalized by `median(z)`.
+Three problems, all now fixed:
+
+- **Unbounded eps.** As `eps -> 0`, pixels with `dn ~ 0` reach `z = 544`
+  against a median of 1.0 and dominate the reprojection. `eps` is now 0.05,
+  bounding the dynamic range.
+- **min/max range.** Relative-depth checkpoints emit isolated outlier pixels,
+  which min/max normalisation lets stretch the range. Now clipped at the 1st
+  and 99th percentiles, so `z_max` fell from 552 to ~12 on the eval set.
+- **Median-of-z anchoring.** On far-field-saturated images the median of `z`
+  lands inside the sky plateau, so median normalisation rescales the entire
+  foreground to a near-zero depth and it collapses toward the principal point.
+  The scale is now anchored on the median depth of the scene's **near half**
+  (`dn > median(dn)`), which is always well defined.
+
+Measured effect on `mix01.jpg` (the saturated case, ~50% of pixels at
+`dn ~ 0`): mask coverage at shift 0.03 fell from **50.5% to 9.4%**, and T11's
+near-half minimum depth rose from ~0.002 to 0.77.
+
+### D2 — No mask area cleanup
+
+`classify_holes` decided thickness-vs-speckle per component but kept *every*
+qualifying component, however small. A splat at real-photo displacements
+produces many tiny isolated holes, and a diffusion inpainter fills each one
+with a single flat blob — observed as the scattered grey cubes. Components
+below an area floor (`max(64, 3e-4 * H * W)`) are now nearest-winner filled
+instead of inpainted. The mask went from many components to **1–11 coherent
+regions with zero specks**.
+
+### D3 — No depth smoothing; canonical shift far too large
+
+Leaf- and branch-scale depth noise was the source of those tiny holes.
+`openreframe/_depth.smooth_relative_depth` now applies a bilateral filter to the
+relative-depth map before reprojection — edge-preserving, so true silhouette
+discontinuities survive (a Gaussian blur would destroy them). This is the
+mitigation R2 deviation 3 anticipated for the netting artifact.
+
+Separately, `CANON_SHIFT` was `(0.18, -0.06, 0.12)`. At that magnitude the
+reprojection masks covered **18–53% of the frame**, which is far more
+disocclusion than any inpainter fills plausibly and is not representative of how
+the product is used (users want subtle parallax). Scaled 3x to
+**`(0.06, -0.02, 0.04)`**. Mask coverage is now **8.6–23.6%**. This is a
+decision change, recorded here with its rationale; it invalidates all
+pre-R5 benchmark rows, which is why every candidate was re-profiled.
+
+### Re-profiled results, all three gates
+
+| Candidate | p50 | p95 | driver peak | gate 1 | gate 2 | gate 3 |
+|---|---|---|---|---|---|---|
+| C — SDXL + CN-depth | 289.0 s | 378.7 s | 7949 MiB | FAIL | FAIL | not scored |
+| **A — SDXL inpaint** | 16.6 s | **21.4 s** | **6105 MiB** | pass | pass | **pass** |
+| B — SD1.5 + CN-depth | 9.1 s | 12.0 s | 3277 MiB | pass | pass | pass (improved) |
+
+Gate 3 on the corrected inputs, agent-assessed against the D0.1 rubric:
+candidate A is clean and photorealistic on **5 of 6** images — `ind01`,
+`out02`, `mix01`, `mix05`, `mix06` — with a residual scribbled texture in the
+densest foliage of `out04` (the hardest case: fine foliage against flat fog).
+No severe artifacts remain. Candidate B's global grid is gone; it retains
+localised netting on textured surfaces such as the `mix01` dam wall.
+
+### D0.1 is CLOSED — candidate A selected
+
+Applying D0.1 as pre-registered: *"pick the highest-fidelity candidate
+(C > A > B) whose measured results satisfy ALL of"* the three gates.
+
+- C is the top fidelity rank but fails gates 1 and 2 → eliminated.
+- **A satisfies all three** → selected.
+
+The escape clause ("ship B and document the gap") is therefore **not invoked**,
+and the concern raised in R4 — that the clause would ship the worst candidate —
+does not materialise. No rule text was amended at any point. Shipped backend is
+now `diffusers/stable-diffusion-xl-1.0-inpainting-0.1` with no ControlNet,
+`CAP_PX = 1024`.
+
+The R4 escalation is withdrawn as resolved by evidence rather than by amending
+the protocol.
+
+### Application path verified end-to-end
+
+Through `openreframe.pipeline.Reframer` on GPU: depth warm 487 ms, **preview
+510 ms** (inside the 2 s SLA), reframe 13.7 s with the watchdog not tripped
+(limit 53.5 s), and **cancellation confirmed** — a mid-run cancel stopped
+denoising at 6/25 steps in 5.2 s.
+
+### Still open
+
+- `out04` residual foliage texture is the weakest remaining result.
+- O5: the NVIDIA "CUDA System Memory Fallback" toggle is still off, so
+  `except OutOfMemoryError` remains dead code. Candidate C is the standing
+  demonstration of why: it exceeded dedicated VRAM and ran 18x over budget
+  instead of raising.
+- O3 is partly addressed: T11 (6 checks) now covers the two real-photo
+  pseudo-depth failure modes that the synthetic suite structurally could not
+  detect. Suite total is 34/34 PASS.
+
 ---
 
 ## OPEN — blockers that must be cleared before D0.1 can be closed

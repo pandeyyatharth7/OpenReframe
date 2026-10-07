@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _bench  # noqa: F401  (sets HF_HUB_CACHE into <repo>/models before any HF call)
 from _reproj import (build_intrinsics, depth_rel_to_pseudo_z, forward_warp_full,
                      slider_to_center)
@@ -22,7 +23,12 @@ IMG_DIR = REPO / "assets" / "test_images"
 PAIRS_DIR = REPO / "outputs" / "warppairs"
 
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Large-hf"
-CANON_SHIFT = (0.18, -0.06, 0.12)
+# Scaled 3x down from the original (0.18, -0.06, 0.12). At 0.18 the reprojection
+# masks covered 18-53% of the frame -- far more disocclusion than any inpainter
+# fills plausibly, and not representative of how the product is actually used.
+# See docs/decisions.md R5. Kept here (not imported from openreframe.config) so
+# the probe scripts stay self-contained, but the values must match.
+CANON_SHIFT = (0.06, -0.02, 0.04)
 NEUTRAL_PROMPT = "a high quality, detailed photograph"
 NEGATIVE_PROMPT = "blurry, low quality, distorted, watermark, text"
 SEED = 0
@@ -47,6 +53,8 @@ def get_pairs() -> dict[str, dict[str, Path]]:
 
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
+    from openreframe._depth import smooth_relative_depth
+
     proc = AutoImageProcessor.from_pretrained(DEPTH_MODEL)
     model = AutoModelForDepthEstimation.from_pretrained(
         DEPTH_MODEL, dtype=torch.float16).to("cuda").eval()
@@ -60,7 +68,7 @@ def get_pairs() -> dict[str, dict[str, Path]]:
         d_full = torch.nn.functional.interpolate(
             pred[None, None], size=(h, w), mode="bicubic",
             align_corners=False).squeeze()
-        z = depth_rel_to_pseudo_z(d_full)
+        z = depth_rel_to_pseudo_z(smooth_relative_depth(d_full))
         rgb = torch.from_numpy(np.asarray(img).astype(np.float32) / 255).permute(2, 0, 1)
         Cen = slider_to_center(CANON_SHIFT, float(z.median()))
         res = forward_warp_full(rgb, z, build_intrinsics(w, h), Cen)

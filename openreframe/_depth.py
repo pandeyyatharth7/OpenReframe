@@ -9,12 +9,14 @@ from __future__ import annotations
 import hashlib
 import threading
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
 
 from ._warp import depth_rel_to_pseudo_z
-from .config import DEPTH_MODEL, device
+from .config import (DEPTH_MODEL, DEPTH_SMOOTH_SIGMA_RANGE,
+                     DEPTH_SMOOTH_SIGMA_SPACE, device)
 
 
 class DepthEstimator:
@@ -80,7 +82,7 @@ class DepthEstimator:
         full = torch.nn.functional.interpolate(
             pred[None, None], size=(h, w), mode="bicubic",
             align_corners=False).squeeze()
-        z = depth_rel_to_pseudo_z(full)
+        z = depth_rel_to_pseudo_z(smooth_relative_depth(full))
 
         with self._lock:
             self._cache[k] = z
@@ -113,3 +115,20 @@ def rgb_to_tensor(img: Image.Image) -> torch.Tensor:
     """(3,H,W) float32 in [0,1]."""
     return torch.from_numpy(
         np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0).permute(2, 0, 1)
+
+
+def smooth_relative_depth(d: torch.Tensor) -> torch.Tensor:
+    """Edge-preserving smoothing of a relative-depth map, normalized to [0,1].
+
+    A forward splat turns leaf- and branch-scale depth noise into large numbers
+    of tiny isolated holes. A diffusion inpainter fills each such hole with a
+    single flat blob, which is the scattered-cube artifact observed on foliage
+    in `outputs/inpaint/A_sdxl_inpaint/`. Bilateral smoothing suppresses the
+    noise while leaving true depth discontinuities at silhouettes intact, which
+    a Gaussian blur would destroy.
+    """
+    span = (d.max() - d.min()).clamp_min(1e-6)
+    dn = ((d - d.min()) / span).numpy().astype(np.float32)
+    out = cv2.bilateralFilter(dn, 0, DEPTH_SMOOTH_SIGMA_RANGE,
+                              DEPTH_SMOOTH_SIGMA_SPACE)
+    return torch.from_numpy(out)

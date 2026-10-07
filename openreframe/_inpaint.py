@@ -1,8 +1,10 @@
-"""Inpainting backend — candidate B, locked for v1 under D0.1 / R3.
+"""Inpainting backend — candidate A (SDXL-inpaint), selected under D0.1 / R5.
 
-SD1.5-inpaint + depth-ControlNet. Chosen under the pre-registered rule's own
-escape clause ("if no candidate satisfies all three, ship B and document the
-gap") because candidates A and C were never profiled — see docs/decisions.md R3.
+SDXL-inpaint with no ControlNet. Candidate C (SDXL + depth-ControlNet) is the
+higher fidelity rank in the pre-registered table but exceeds both the VRAM and
+the latency gate on this hardware: it ran at a 378.7 s p95 against a 30 s limit
+after silently spilling into system RAM. Candidate B (SD1.5 + depth-ControlNet)
+fits comfortably but leaves visible netting on textured surfaces.
 
 Two mechanisms cooperate here:
 - cancellation, via `pipe._interrupt` observed at a step boundary (the pattern
@@ -21,7 +23,7 @@ from PIL import Image
 
 from ._watchdog import StageWatchdog
 from .config import (BACKEND_BASE, BACKEND_CONTROLNET, CAP_PX,
-                     CONTROLNET_SCALE, GUIDANCE, NEGATIVE_PROMPT,
+                     CONTROLNET_SCALE, GEN_P95_S, GUIDANCE, NEGATIVE_PROMPT,
                      NEUTRAL_PROMPT, STEPS, device, local_or_repo)
 
 
@@ -30,10 +32,10 @@ class GenerationCancelled(Exception):
 
 
 class Inpainter:
-    """Lazily-loaded candidate B pipeline."""
+    """Lazily-loaded candidate A pipeline (ControlNet optional)."""
 
     def __init__(self, base: str = BACKEND_BASE,
-                 controlnet: str = BACKEND_CONTROLNET,
+                 controlnet: str | None = BACKEND_CONTROLNET,
                  cap_px: int = CAP_PX) -> None:
         self.base = base
         self.controlnet = controlnet
@@ -54,7 +56,9 @@ class Inpainter:
                 return
             from diffusers import (ControlNetModel,
                                    DPMSolverMultistepScheduler,
-                                   StableDiffusionControlNetInpaintPipeline)
+                                   StableDiffusionControlNetInpaintPipeline,
+                                   StableDiffusionXLControlNetInpaintPipeline,
+                                   StableDiffusionXLInpaintPipeline)
             # fp16 on CPU is both unsupported for some kernels and extremely
             # slow, so the CPU path keeps fp32 (and skips the fp16 variant).
             cuda = self._dev == "cuda"
@@ -62,11 +66,24 @@ class Inpainter:
             kw = dict(torch_dtype=dt)
             if cuda:
                 kw["variant"] = "fp16"
-            cn = ControlNetModel.from_pretrained(
-                local_or_repo(self.controlnet), **kw)
-            pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
-                local_or_repo(self.base), controlnet=cn,
-                safety_checker=None, requires_safety_checker=False, **kw)
+
+            cn = None
+            cls = StableDiffusionXLInpaintPipeline
+            extra: dict = {}
+            if self.controlnet:
+                cls = StableDiffusionXLControlNetInpaintPipeline
+                cn = ControlNetModel.from_pretrained(
+                    local_or_repo(self.controlnet), **kw)
+                extra["controlnet"] = cn
+            elif "stable-diffusion-v1-5" in self.base:
+                cls = StableDiffusionControlNetInpaintPipeline
+                cn = ControlNetModel.from_pretrained(
+                    local_or_repo("lllyasviel/control_v11f1p_sd15_depth"), **kw)
+                extra["controlnet"] = cn
+
+            pipe = cls.from_pretrained(local_or_repo(self.base), **extra,
+                                       safety_checker=None,
+                                       requires_safety_checker=False, **kw)
             pipe.scheduler = DPMSolverMultistepScheduler.from_config(
                 pipe.scheduler.config, use_karras_sigmas=True,
                 algorithm_type="dpmsolver++")
@@ -86,11 +103,11 @@ class Inpainter:
 
     # -- generation --------------------------------------------------------
     def generate(self, warped: Image.Image, mask: Image.Image,
-                 cond: Image.Image, width: int, height: int,
+                 cond: Image.Image | None, width: int, height: int,
                  on_step=None, cancel: threading.Event | None = None,
-                 expected_p95_s: float = 10.6,
+                 expected_p95_s: float = GEN_P95_S,
                  watchdog_enabled: bool = True) -> dict:
-        """Fill `mask` in `warped`, depth-conditioned by `cond`.
+        """Fill `mask` in `warped`, optionally depth-conditioned by `cond`.
 
         `on_step(step_index, total_steps)` is called after every denoising step.
         Setting `cancel` stops at the next step boundary. Raises
@@ -99,8 +116,12 @@ class Inpainter:
         if self._pipe is None:
             raise RuntimeError("pipeline not loaded; call load() first")
         pipe = self._pipe
-        total = STEPS
+        uses_cn = getattr(pipe.config, "_class_name", "").find("ControlNet") >= 0
+        if uses_cn and cond is None:
+            raise ValueError("this pipeline is ControlNet-conditioned; "
+                             "a conditioning depth map is required")
 
+        total = STEPS
         state = {"n": 0, "cancelled": False}
 
         def cb(p, i, _t, kw):
@@ -116,11 +137,12 @@ class Inpainter:
         pipe._interrupt = False
 
         kw = dict(prompt=NEUTRAL_PROMPT, negative_prompt=NEGATIVE_PROMPT,
-                  image=warped, mask_image=mask, control_image=cond,
-                  controlnet_conditioning_scale=CONTROLNET_SCALE,
-                  width=width, height=height, num_inference_steps=total,
-                  guidance_scale=GUIDANCE, generator=gen,
-                  callback_on_step_end=cb)
+                  image=warped, mask_image=mask, width=width, height=height,
+                  num_inference_steps=total, guidance_scale=GUIDANCE,
+                  generator=gen, callback_on_step_end=cb)
+        if uses_cn:
+            kw["control_image"] = cond
+            kw["controlnet_conditioning_scale"] = CONTROLNET_SCALE
 
         t0 = time.perf_counter()
         with StageWatchdog(expected_p95_s, on_exceed=lambda: setattr(

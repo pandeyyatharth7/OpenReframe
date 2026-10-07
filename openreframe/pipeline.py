@@ -22,7 +22,7 @@ from ._inpaint import GenerationCancelled, Inpainter
 from ._warp import (build_intrinsics, forward_warp_full,
                     render_preview_with_gaps, slider_to_center, validate_warp)
 
-MAX_SHIFT = 0.5   # beyond this the validator rejects the shift outright
+MAX_SHIFT = 0.25   # ~4x the canonical shift; beyond this masks stop being fillable
 
 
 def _to_u8(t: torch.Tensor) -> np.ndarray:
@@ -60,9 +60,11 @@ class Reframer:
         return self.depth.loaded
 
     def health(self) -> dict:
+        cn = config.BACKEND_CONTROLNET or "none"
         h = {"device": self._dev, "depth_loaded": self.depth.loaded,
              "inpaint_loaded": self.inpaint.loaded,
-             "backend": f"{config.BACKEND_BASE}+{config.BACKEND_CONTROLNET}",
+             "backend": f"{config.BACKEND_BASE}+{cn}",
+             "cap_px": config.CAP_PX,
              "vram_ceil_mb": config.VRAM_CEIL_MB}
         if self._dev == "cuda" and torch.cuda.is_available():
             h["vram_alloc_mb"] = round(torch.cuda.memory_allocated() / 2**20, 1)
@@ -137,7 +139,6 @@ class Reframer:
             gen = self.inpaint.generate(
                 warped, mask, cond, nw, nh, on_step=on_step, cancel=cancel,
                 watchdog_enabled=watchdog_enabled)
-
         hole_pct = float((np.asarray(mask) > 127).mean()) * 100.0
         return {
             "filled": gen["image"],

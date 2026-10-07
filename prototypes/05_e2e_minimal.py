@@ -68,7 +68,10 @@ def build(pipeline_id: str):
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(
         pipe.scheduler.config, use_karras_sigmas=True, algorithm_type="dpmsolver++")
     pipe.enable_model_cpu_offload()
-    pipe.enable_vae_tiling()
+    # SDXL pipelines do not expose enable_vae_tiling; guard optional knobs.
+    for opt in ("enable_vae_tiling", "enable_vae_slicing"):
+        if hasattr(pipe, opt):
+            getattr(pipe, opt)()
     return pipe
 
 

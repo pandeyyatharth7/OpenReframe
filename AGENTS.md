@@ -50,10 +50,11 @@ models/               weights (gitignored)
    suite validates the code that actually ships.
 2. **`prototypes/04_reprojection_math.py` is the test suite** (there is no
    pytest). It exits non-zero on any failure. Run it after touching warp code
-   and require 28/28 PASS.
-3. **The test suite has a known blind spot** — it uses a synthetic linear depth
-   ramp, so median normalization is always well-behaved. It cannot detect real-photo
-   depth failures. See open blocker O3 in `docs/decisions.md`.
+   and require **34/34 PASS**.
+3. **The shipped backend is candidate A** — `diffusers/stable-diffusion-xl-1.0-inpainting-0.1`,
+   no ControlNet, `CAP_PX = 1024`. Selected under D0.1 (see `docs/decisions.md`
+   R5). Do not reintroduce the ControlNet conditioning path as the default:
+   candidate C exceeds both the VRAM and latency gates on this hardware.
 4. **`config.CANON_SHIFT`, `config.SEED`, `config.STEPS`, `config.GUIDANCE` are
    frozen.** They define the comparison protocol. Changing one invalidates every
    benchmark row recorded under it.
@@ -65,6 +66,9 @@ models/               weights (gitignored)
 7. **Never import `huggingface_hub` / `transformers` before `openreframe._paths`.**
    The HF cache location is read into a module constant at import time.
    Importing the `openreframe` package does this for you.
+8. **Never raise `CANON_SHIFT` above ~0.06** to get a more dramatic result.
+   Mask coverage scales with it — at 0.18 the masks covered 18–53% of the frame
+   and inpainting quality collapsed. `MAX_SHIFT` is 0.25.
 
 ## Conventions
 
@@ -102,23 +106,24 @@ and anything calling `/api/reframe`. Geometry and preview run on CPU.
 
 ## Current state — read before claiming anything works
 
-`docs/decisions.md` ends with five open blockers. Two are severe and neither is
-resolved:
+`docs/decisions.md` is the authoritative record. **D0.1 is closed** (R5):
+candidate A is the shipped backend. Depth selection (R1) and the reprojection
+math (R2) are resolved. Three reprojection defects found during R4 were fixed in
+R5 and every candidate re-profiled — see that entry for the numbers.
 
-- **O1 — candidate B fails the D0.1 artifact gate.** Existing outputs in
-  `outputs/inpaint/B_sd15_cn/` show a grid artifact across the whole frame.
-  The warp output is coherent, so the defect is in the diffusion stage, most
-  likely a degenerate ControlNet conditioning map. **D0.1 is NOT closed** — the
-  "ship B and document the gap" escape clause does not apply when the candidate
-  intended to ship fails the quality gate itself.
-- **O2 — relative-depth normalization is defective on far-field-heavy images.**
-  `z = 1/(dn + 1e-3)` is unbounded and median-normalization collapses when ~50%
-  of an image sits at `dn ≈ 0` (`mix01.jpg`: 49.9%). Do not treat the pipeline
-  as shippable until this is fixed, re-validated and re-profiled.
+Remaining known issues:
 
-Also outstanding: `outputs/warppairs/` was invalidated and not regenerated; no
-benchmark rows were added in this pass; `05_e2e_minimal.py` has never been run;
-and the NVIDIA "CUDA System Memory Fallback" toggle is still off.
+- **`out04` residual foliage texture** — the weakest result in the set. Dense
+  fine foliage against flat fog still shows a scribbled texture after inpainting.
+- **WDDM CUDA System Memory Fallback is still ACTIVE**, so `except
+  OutOfMemoryError` is dead code and real OOMs appear as slowdowns. Candidate C
+  is the standing demonstration (it exceeded dedicated VRAM and ran 18x over
+  budget instead of raising). `openreframe/_watchdog.py` catches this by
+  wall-clock instead. Disable the toggle in the NVIDIA Control Panel to make the
+  exception handlers live again.
+- `outputs/warppairs/` and `outputs/inpaint/*` were regenerated under R5, but
+  `05_e2e_minimal.py` has only ever been run for candidate A.
+- SD1.5 and SDXL weights are both present; `models/direct/` is ~13 GB.
 
 ## Verification expectations
 
@@ -126,6 +131,8 @@ and the NVIDIA "CUDA System Memory Fallback" toggle is still off.
   behaviour changed.
 - Any change to depth/pseudo-depth: add a check that covers the real-photo case
   the synthetic suite misses, or the suite will happily pass a broken change.
+  T11 exists for exactly this reason — its two cases were both real bugs that
+  the synthetic suite could not see.
 - Any change to generation settings: re-profile the affected candidate and let
   `_bench.py` write the rows. Do not hand-write numbers.
 - If GPU access is unavailable, say so and stop. Do not infer benchmark numbers

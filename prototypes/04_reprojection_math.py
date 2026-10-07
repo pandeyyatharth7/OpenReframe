@@ -295,6 +295,41 @@ def main() -> int:
     check("T10 fill covers every uncovered pixel",
           bool((fill_s == (~cov_s)).all()))
 
+    # ---------- T11: pseudo-depth robustness (real-photo failure modes) ----
+    # The synthetic scene above uses a controlled depth ramp, so it can never
+    # expose a defect in the relative-depth -> pseudo-depth transform itself.
+    # These cases reproduce the two measured real-photo failures.
+    from _reproj import depth_rel_to_pseudo_z as _dnz
+
+    # (a) Far-field saturation: ~50% of pixels at dn ~= 0 (mix01.jpg).
+    sat = torch.full((200, 200), 0.1)
+    sat[100:, :] = torch.linspace(0.5, 1.0, 200)      # near half below
+    sat[:100, :] = 0.0                               # sky: half the frame at 0
+    z_sat = _dnz(sat)
+    lo, hi = float(z_sat.min()), float(z_sat.max())
+    check("T11 saturated far field: depth stays bounded",
+          hi / max(float(z_sat.median()), 1e-9) < 50.0,
+          f"max/median={hi / max(float(z_sat.median()), 1e-9):.1f}")
+    check("T11 saturated far field: near half not collapsed",
+          lo > 0.05,
+          f"near-half min depth={lo:.4f} (was ~0.002 before the anchor fix)")
+    check("T11 saturated far field: far field still ordered behind",
+          float(z_sat[:100, :].median()) > float(z_sat[100:, :].median()),
+          f"sky={float(z_sat[:100, :].median()):.2f} near={float(z_sat[100:, :].median()):.2f}")
+
+    # (b) Isolated outlier pixels must not stretch the range (mix05/out04/ind01,
+    #     where a handful of pixels drove z_max to 181-552).
+    out_liers = torch.linspace(0.0, 1.0, 40000).reshape(200, 200).clone()
+    out_liers[7, 11] = -1e4
+    out_liers[13, 17] = 1e4
+    z_ol = _dnz(out_liers)
+    check("T11 outliers clipped (bounded dynamic range)",
+          float(z_ol.max()) / max(float(z_ol.median()), 1e-9) < 50.0,
+          f"max/median={float(z_ol.max()) / max(float(z_ol.median()), 1e-9):.1f}")
+    ramp = z_ol[20:-20, 20:-20]
+    check("T11 monotonic ordering preserved under clipping",
+          bool((z_ol[100, :-1] >= z_ol[100, 1:] - 1e-5).all()))
+
     print("-" * 60)
     print(f"{len(fails)} failure(s)" + (f": {fails}" if fails else ""))
     return 1 if fails else 0
