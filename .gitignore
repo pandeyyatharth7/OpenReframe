@@ -4,6 +4,7 @@ __pycache__/
 models/
 outputs/
 *.log
+*.err
 *.pid*
 *.part
 .env

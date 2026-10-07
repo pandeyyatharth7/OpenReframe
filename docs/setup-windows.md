@@ -88,7 +88,42 @@ outrank finals, but a preview submitted *during* a running diffusion waits for
 it — the queue orders new work, it does not preempt a generation the user is
 waiting on.
 
-## 6. Known platform facts discovered during validation
+## 6. GPU runbook
+
+The machine is fully provisioned for GPU work; nothing needs downloading.
+Because laptop GPUs are thermally/power limited, plug in the charger before
+starting.
+
+```powershell
+# 0. gate the environment — must print ENVIRONMENT OK
+& .\.venv\Scripts\python.exe prototypes\00_env_check.py
+
+# 1. the test suite — must exit 0 with 28/28 PASS
+& .\.venv\Scripts\python.exe prototypes\04_reprojection_math.py
+
+# 2. regenerate outputs/warppairs/ (invalidated in Phase 0) with repaired masks,
+#    then re-profile candidate B — writes rows to docs/benchmarks.md
+& .\.venv\Scripts\python.exe prototypes\03_inpaint_sd15_cn.py
+
+# 3. candidates A and C — now that the SDXL weights are present
+& .\.venv\Scripts\python.exe prototypes\02_inpaint_sdxl.py --variant inpaint
+& .\.venv\Scripts\python.exe prototypes\02_inpaint_sdxl.py --variant controlnet
+
+# 4. first real end-to-end image (has never been run in this project's history)
+& .\.venv\Scripts\python.exe prototypes\05_e2e_minimal.py --pipeline C
+```
+
+Step 2 must precede step 3: `get_pairs()` regenerates the shared
+(warped, mask, cond) cache on first call, so whichever candidate runs first
+fixes the inputs for all of them. Run them in that order, or the benchmark rows
+will not be comparable.
+
+Steps 2-4 all append to `docs/benchmarks.md`. Do not hand-edit that file.
+
+See open blockers O1-O4 in `docs/decisions.md` for what these runs are meant to
+close.
+
+## 7. Known platform facts discovered during validation
 
 - Desktop baseline VRAM usage fluctuates (~420 MiB → ~1.6 GiB observed) with
   open apps; treat 6.8 GiB as the hard ceiling for any single pipeline stage.
@@ -105,7 +140,8 @@ waiting on.
 - `models/direct/` exists because hf-xet stalled during downloads.
   `scripts/download_direct.py` bypasses xet with chunked Range-resume GETs.
   Weights may live in either store; resolve with `config.local_or_repo()`.
-- **SDXL weights are incomplete.** `text_encoder_2/model.fp16.safetensors` is a
-  truncated `.part` file and `diffusers/controlnet-depth-sdxl-1.0` was never
-  fetched, so candidates A and C cannot be profiled. See `docs/decisions.md`
-  open blocker O1.
+- All five weight sets required by every candidate are present and verified
+  loadable: Depth Anything V2 S/B/L (in `models/hub/`), SD1.5-inpaint +
+  SD1.5 depth-ControlNet (candidate B), SDXL-inpaint (A), SD1.5-inpaint +
+  SDXL depth-ControlNet (C). Use `--fp16-only` when downloading — every load
+  path passes `variant="fp16"`, so the fp32 copies are dead weight.

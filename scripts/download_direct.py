@@ -29,13 +29,26 @@ GROUPS = {
 CHUNK = 1 << 20
 
 
-def fetch(repo_id: str) -> None:
+def fetch(repo_id: str, fp16_only: bool = False) -> None:
     api = HfApi()
     files = api.list_repo_files(repo_id)
-    keep = [f for f in files
-            if not f.endswith(SKIP)
-            and not any(f.startswith(d) or f"/{d}" in f + "/" for d in SKIP_DIRS)
-            and "safety_checker" not in f]
+
+    def want(f: str) -> bool:
+        if f.endswith(SKIP):
+            return False
+        if any(f.startswith(d) or f"/{d}" in f + "/" for d in SKIP_DIRS):
+            return False
+        if "safety_checker" in f:
+            return False
+        # Every OpenReframe load path passes variant="fp16" and runs fp16 on
+        # CUDA, so the fp32 copies are never read -- they only double the
+        # transfer. Config files are always kept.
+        if fp16_only and f.endswith(".safetensors") \
+                and not f.endswith(".fp16.safetensors"):
+            return False
+        return True
+
+    keep = [f for f in files if want(f)]
     short = repo_id.replace("/", "__")
     print(f"[{repo_id}] {len(keep)} files", flush=True)
     for f in keep:
@@ -80,5 +93,6 @@ def fetch(repo_id: str) -> None:
 
 if __name__ == "__main__":
     group = sys.argv[1]
+    fp16_only = "--fp16-only" in sys.argv[2:]
     for rid in GROUPS[group]:
-        fetch(rid)
+        fetch(rid, fp16_only=fp16_only)

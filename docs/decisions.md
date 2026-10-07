@@ -235,9 +235,16 @@ performed and no rows were added to `docs/benchmarks.md`:
 - the D0.1 gate-3 rubric on fresh outputs.
 
 `outputs/warppairs/` was invalidated and has **not** been regenerated; the
-pre-repair masks it held are gone. Re-run
-`prototypes/03_inpaint_sd15_cn.py` on the GPU to rebuild both the cache and
-the benchmark rows before any gate is reconsidered.
+pre-repair masks it held are gone.
+
+**Update — weights now complete.** All five required weight sets are on disk
+and verified to construct. `diffusers/stable-diffusion-xl-1.0-inpainting-0.1`
+(unet 4897 MB fp16, text_encoder_2 1325 MB fp16, vae 160 MB fp16) and
+`diffusers/controlnet-depth-sdxl-1.0` (2386 MB fp16) were fetched after this
+entry was written; the previously truncated `text_encoder_2` `.part` completed.
+`prototypes/02_inpaint_sdxl.py` can now profile candidates A and C, which
+reopens the only legitimate route to closing D0.1 (see O1). Only the GPU run
+is outstanding.
 
 ### O5 — OOM handling is now duplicated but only partly effective
 
