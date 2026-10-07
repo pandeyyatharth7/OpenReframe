@@ -1,0 +1,19 @@
+# OpenReframe — validated environment (see docs/setup-windows.md)
+# torch/torchvision are CUDA wheels; install them first with:
+#   pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+transformers==5.15.1
+diffusers==0.40.0
+accelerate==1.14.0
+huggingface_hub==1.28.0
+safetensors==0.8.0
+opencv-python==5.0.0.93
+numpy==2.4.6
+scipy==1.17.1
+Pillow==12.3.0
+
+# serving (added with the FastAPI app)
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32

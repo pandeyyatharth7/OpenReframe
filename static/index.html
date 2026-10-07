@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenReframe</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --line: #2b3038; --text: #e8eaed;
+    --muted: #9aa3af; --accent: #6ea8fe; --gap: #ff00ff; --bad: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--line);
+           display: flex; align-items: baseline; gap: 14px; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  #health { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  main { display: grid; grid-template-columns: 280px 1fr; gap: 0; height: calc(100vh - 53px); }
+  aside { padding: 18px; border-right: 1px solid var(--line); overflow-y: auto; }
+  section { padding: 18px; overflow: auto; }
+  .group { margin-bottom: 22px; }
+  .group > label { display: block; font-size: 12px; color: var(--muted);
+                   margin-bottom: 8px; text-transform: uppercase; letter-spacing: .06em; }
+  input[type=range] { width: 100%; margin: 4px 0 2px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; }
+  .val { font-variant-numeric: tabular-nums; color: var(--accent); font-size: 13px; }
+  button { background: var(--accent); color: #0d1117; border: 0; border-radius: 6px;
+           padding: 9px 14px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button.danger { background: var(--bad); color: #1a0d0d; }
+  .stack { display: grid; gap: 8px; }
+  .stage { position: relative; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+  .stage img { display: block; width: 100%; height: auto; }
+  .stage .cap { padding: 7px 10px; font-size: 11px; color: var(--muted);
+                border-top: 1px solid var(--line); display: flex; justify-content: space-between; }
+  .drop { border: 2px dashed var(--line); border-radius: 8px; padding: 34px 16px;
+          text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.hover { border-color: var(--accent); color: var(--text); }
+  #bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden;
+         display: none; margin-top: 8px; }
+  #barfill { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
+  #msg { font-size: 12px; color: var(--muted); min-height: 18px; margin-top: 8px; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  kbd { background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+        padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenReframe</h1>
+  <span class="sub">depth-aware single-image reframing</span>
+  <span class="spacer"></span>
+  <span id="health">connecting…</span>
+</header>
+
+<main>
+  <aside>
+    <div class="group">
+      <label>Source</label>
+      <div class="drop" id="drop">Drop an image, or click to choose</div>
+      <input type="file" id="file" accept="image/*" hidden />
+    </div>
+
+    <div class="group" id="controls" style="display:none">
+      <label>Camera shift <span class="hint">— units of median scene depth</span></label>
+      <div class="row"><span>Lateral X</span><span class="val" id="vX">0.00</span></div>
+      <input type="range" id="sX" min="-0.5" max="0.5" step="0.005" value="0" />
+      <div class="row"><span>Lateral Y</span><span class="val" id="vY">0.00</span></div>
+      <input type="range" id="sY" min="-0.5" max="0.5" step="0.005" value="0" />
+      <div class="row"><span>Forward</span><span class="val" id="vF">0.00</span></div>
+      <input type="range" id="sF" min="-0.5" max="0.5" step="0.005" value="0" />
+      <button class="ghost" id="reset" style="width:100%;margin-top:10px">Reset</button>
+    </div>
+
+    <div class="group stack" id="actions" style="display:none">
+      <button id="go">Render final</button>
+      <button id="cancel" class="danger" disabled>Cancel</button>
+      <div id="bar"><div id="barfill"></div></div>
+      <div id="msg"></div>
+    </div>
+  </aside>
+
+  <section>
+    <div class="stage"><img id="iOrig" alt="source" /><div class="cap"><span>Source</span><span id="cOrig"></span></div></div>
+    <div class="stage"><img id="iPrev" alt="preview" /><div class="cap"><span>Geometry preview <span style="color:var(--gap)">■</span> magenta = will be inpainted</span><span id="cPrev"></span></div></div>
+    <div class="stage" id="finalWrap" style="display:none"><img id="iFinal" alt="result" /><div class="cap"><span>Final (inpainted)</span><span id="cFinal"></span></div></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let imageId = null, previewJob = null, finalJob = null, pollTimer = null;
+
+const shift = () => [+$('sX').value, +$('sY').value, +$('sF').value];
+
+function say(t, bad) {
+  $('msg').textContent = t || '';
+  $('msg').style.color = bad ? 'var(--bad)' : 'var(--muted)';
+}
+
+async function health() {
+  try {
+    const r = await fetch('/api/health');
+    const h = await r.json();
+    $('health').textContent =
+      `${h.device} · depth ${h.depth_loaded ? 'ok' : '—'} · inpaint ${h.inpaint_loaded ? 'ok' : '—'} · queue ${h.queued}`;
+    $('health').style.color = (h.depth_loaded && h.inpaint_loaded) ? 'var(--muted)' : '#d8a13a';
+  } catch { $('health').textContent = 'server offline'; }
+}
+setInterval(health, 2000); health();
+
+/* ---------- upload ---------- */
+const drop = $('drop'), file = $('file');
+drop.onclick = () => file.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('hover'); };
+drop.ondragleave = () => drop.classList.remove('hover');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('hover'); upload(e.dataTransfer.files[0]); };
+file.onchange = () => upload(file.files[0]);
+
+async function upload(f) {
+  if (!f) return;
+  say('uploading…');
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch('/api/upload', { method: 'POST', body: fd });
+  if (!r.ok) return say((await r.json()).detail || 'upload failed', true);
+  const j = await r.json();
+  imageId = j.image_id;
+  $('iOrig').src = `/api/image/${imageId}`;
+  $('cOrig').textContent = `${j.width}×${j.height}`;
+  $('controls').style.display = $('actions').style.display = '';
+  $('finalWrap').style.display = 'none';
+  say('image loaded — drag a slider for a geometry preview');
+  requestPreview();
+}
+
+/* ---------- preview ---------- */
+let debounce = null;
+['sX','sY','sF'].forEach(id => $(id).addEventListener('input', () => {
+  const [x,y,f] = shift();
+  $('vX').textContent = x.toFixed(2);
+  $('vY').textContent = y.toFixed(2);
+  $('vF').textContent = f.toFixed(2);
+  clearTimeout(debounce);
+  debounce = setTimeout(requestPreview, 120);
+}));
+
+$('reset').onclick = () => { $('sX').value=$('sY').value=$('sF').value=0;
+  $('vX').textContent=$('vY').textContent=$('vF').textContent='0.00'; requestPreview(); };
+
+async function requestPreview() {
+  if (!imageId) return;
+  const r = await fetch('/api/preview', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ image_id: imageId, shift: shift() })
+  });
+  if (!r.ok) return say('preview rejected', true);
+  previewJob = (await r.json()).job_id;
+  poll(previewJob, 'preview');
+}
+
+function poll(jid, kind) {
+  clearTimeout(pollTimer);
+  const tick = async () => {
+    const s = await (await fetch(`/api/jobs/${jid}`)).json();
+    if (kind === 'preview') {
+      if (s.status === 'done') {
+        $('iPrev').src = s.images.overlay + '?t=' + Date.now();
+        const st = s.stats;
+        $('cPrev').textContent =
+          `${st.elapsed_s}s · ${st.hole_pct}% hole · ${st.within_sla ? 'within' : 'OVER'} 2s SLA`;
+        $('cPrev').style.color = st.within_sla ? 'var(--muted)' : '#d8a13a';
+      } else if (s.status === 'error') { say(s.error, true); return; }
+      else { pollTimer = setTimeout(tick, 180); return; }
+      // let a queued final take precedence next
+      if (finalJob && finalJob !== jid) poll(finalJob, 'final');
+      return;
+    }
+    // final
+    if (s.status === 'done') {
+      $('iFinal').src = s.images.filled + '?t=' + Date.now();
+      $('finalWrap').style.display = '';
+      $('cFinal').textContent =
+        `${s.stats.width}×${s.stats.height} · ${s.stats.steps_run}/${s.stats.total_steps} steps · ${s.stats.elapsed_s}s` +
+        (s.stats.watchdog.tripped ? ' · OOM-suspected stall' : '');
+      $('cFinal').style.color = s.stats.watchdog.tripped ? '#d8a13a' : 'var(--muted)';
+      $('bar').style.display = 'none'; $('go').disabled = false;
+      $('cancel').disabled = true;
+      say('done');
+    } else if (s.status === 'error') {
+      $('bar').style.display = 'none'; $('go').disabled = false; $('cancel').disabled = true;
+      say(s.error, true);
+    } else if (s.status === 'cancelled') {
+      $('bar').style.display = 'none'; $('go').disabled = false; $('cancel').disabled = true;
+      say('cancelled');
+    } else {
+      if (s.progress.total) {
+        $('bar').style.display = 'block';
+        $('barfill').style.width = (100 * s.progress.step / s.progress.total) + '%';
+        say(`denoising ${s.progress.step}/${s.progress.total}…`);
+      } else say('queued…');
+      pollTimer = setTimeout(tick, 700);
+    }
+  };
+  tick();
+}
+
+/* ---------- final ---------- */
+$('go').onclick = async () => {
+  if (!imageId) return;
+  $('go').disabled = true; $('cancel').disabled = false;
+  $('bar').style.display = 'block'; $('barfill').style.width = '0%';
+  const r = await fetch('/api/reframe', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ image_id: imageId, shift: shift() })
+  });
+  if (!r.ok) { $('go').disabled = false; $('cancel').disabled = true;
+               return say((await r.json()).detail || 'rejected', true); }
+  finalJob = (await r.json()).job_id;
+  poll(finalJob, 'final');
+};
+
+$('cancel').onclick = async () => {
+  if (!finalJob) return;
+  $('cancel').disabled = true;
+  say('cancelling…');
+  await fetch(`/api/jobs/${finalJob}/cancel`, { method: 'POST' });
+};
+</script>
+</body>
+</html>
