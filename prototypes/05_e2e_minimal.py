@@ -22,10 +22,11 @@ from _prepwarp import (GUIDANCE, NEGATIVE_PROMPT, NEUTRAL_PROMPT, SEED,
 from _reproj import (build_intrinsics, depth_rel_to_pseudo_z,
                      forward_warp_full, render_preview_with_gaps,
                      slider_to_center)
+from openreframe.config import CANON_SHIFT
 
 IMG = Path(__file__).resolve().parents[1] / "assets" / "test_images" / "mix05.jpg"
 OUT = OUTPUTS_DIR / "e2e"
-SHIFT = (0.18, -0.06, 0.12)
+SHIFT = CANON_SHIFT
 
 REPOS = {
     "A": ("diffusers/stable-diffusion-xl-1.0-inpainting-0.1", None),
