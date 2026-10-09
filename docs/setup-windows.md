@@ -1,147 +1,127 @@
-# OpenReframe — Windows Setup Guide (target: RTX 4060 Laptop, 8GB)
+# Windows Setup Guide
 
-Validated configuration — this exact stack is confirmed working on the Sprint-0
-machine. Follow top to bottom for an identical environment.
+This guide describes the validated Windows environment for the local OpenReframe
+app. The reference machine is an NVIDIA RTX 4060 Laptop GPU with 8 GB VRAM and
+32 GB RAM. Other systems may work, but performance and available VRAM will vary.
 
-## 1. Prerequisites
+For an overview and the shortest install path, start with the
+[README](../README.md).
 
-| Component | Requirement | Validated on this machine |
-|---|---|---|
-| OS | Windows 10/11 x64 | Windows 11 (build 26xxx) |
-| GPU | NVIDIA RTX 4060 Laptop 8GB (Ada, sm_89) | NVIDIA GeForce RTX 4060 Laptop GPU |
-| Driver | any recent Game Ready/Studio driver | **610.62** (CUDA UMD 13.3), WDDM mode |
-| Python | 3.10 – 3.12 (64-bit) | **3.11.9** (`py -3.11`) |
-| System RAM | ≥ 16 GB hard requirement (cpu-offload holds SDXL in RAM) | 32 GB soldered |
-| Disk | ≥ 25 GB free for model weights | ~350 GB free |
+## Requirements
 
-Notes:
-- Conda is NOT required; plain `venv` + pip works and is what we test.
-- No CUDA Toolkit install needed — PyTorch wheels bundle the CUDA runtime.
-- Hybrid-graphics note (Optimus laptops): the Windows desktop composites on the
-  dGPU here (~0.4–1.6 GB VRAM baseline varies with open apps). All VRAM rules
-  therefore use fixed ceilings measured via nvidia-smi, never "free memory".
+| Component | Validated setup |
+|---|---|
+| OS | Windows 10/11 x64 |
+| Python | 3.11.9, 64-bit |
+| GPU | NVIDIA RTX 4060 Laptop, 8 GB VRAM |
+| System RAM | 32 GB (16 GB minimum recommended for CPU offload) |
+| Free disk | At least 25 GB for model weights |
 
-## 2. Environment
+Conda and the CUDA Toolkit are not required. The PyTorch CUDA wheel supplies its
+runtime. A GPU is strongly recommended; CPU supports geometry checks, but CPU
+diffusion is not a supported workflow.
+
+## Create the environment
+
+Run from the repository root in PowerShell:
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-.venv\Scripts\python.exe -m pip install transformers diffusers accelerate safetensors opencv-python huggingface_hub scipy pillow numpy
-.venv\Scripts\python.exe -m pip install fastapi "uvicorn[standard]" python-multipart
+& .\.venv\Scripts\python.exe -m pip install --upgrade pip
+& .\.venv\Scripts\python.exe -m pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Pinned versions validated together (also in `requirements.txt`):
+The validated package versions are pinned in `requirements.txt`. The PyTorch
+installation must use the CUDA wheel index shown above; install it before the
+remaining requirements.
 
-```
-torch==2.6.0+cu124  torchvision==0.21.0+cu124
-transformers==5.15.1  diffusers==0.40.0  accelerate==1.14.0
-huggingface_hub==1.28.0  safetensors==0.8.0  opencv-python==5.0.0.93
-numpy==2.4.6  scipy==1.17.1  Pillow==12.3.0
-fastapi==0.142.2  uvicorn[standard]==0.54.0  python-multipart==0.0.32
-```
-
-## 3. Validate
+Check that Python, PyTorch, and the GPU are detected:
 
 ```powershell
-.venv\Scripts\python.exe prototypes\00_env_check.py
-```
-
-Must end with `ENVIRONMENT OK`. Expected key lines:
-- `torch 2.6.0+cu124`, `CUDA available at runtime`
-- `GPU detected — NVIDIA GeForce RTX 4060 Laptop GPU`, capability `(8, 9)`
-- fp16 + bf16 matmul PASS
-
-## 4. Model weights (one-time, needs internet)
-
-```powershell
-.venv\Scripts\python.exe scripts\download_models.py depth      # DA-V2 S/B/L ~1.7 GB
-.venv\Scripts\python.exe scripts\download_models.py inpaint_a   # SDXL-inpaint
-.venv\Scripts\python.exe scripts\download_models.py inpaint_b   # SD1.5-inpaint + CN-depth
-.venv\Scripts\python.exe scripts\download_models.py inpaint_c   # + SDXL CN-depth
-```
-
-Weights land under `models/hub/` (gitignored). After this step the machine is
-fully offline-capable.
-
-## 5. Running the app
-
-```powershell
-# geometry preview only — diffusion is not loaded, so this needs no diffusion VRAM
-& .\.venv\Scripts\python.exe -m openreframe.server --port 8000
-
-# preload the diffusion pipeline on a background thread at startup
-& .\.venv\Scripts\python.exe -m openreframe.server --port 8000 --inpaint
-```
-
-Then open <http://127.0.0.1:8000>. Drop an image, drag the three shift sliders
-for a geometry-only preview (magenta marks the regions that would be
-inpainted), then press **Render final** for the diffusion pass.
-
-The first preview pays a one-off depth-model load (10-60 s). After that a warm
-preview is ~100 ms against the 2 s SLA. Models load lazily by design so the
-server never blocks on startup — `/api/health` is reachable immediately and
-reports `depth_loaded` / `inpaint_loaded`.
-
-Scheduling: one GPU, so one worker thread and a priority queue. Previews
-outrank finals, but a preview submitted *during* a running diffusion waits for
-it — the queue orders new work, it does not preempt a generation the user is
-waiting on.
-
-## 6. GPU runbook
-
-The machine is fully provisioned for GPU work; nothing needs downloading.
-Because laptop GPUs are thermally/power limited, plug in the charger before
-starting.
-
-```powershell
-# 0. gate the environment — must print ENVIRONMENT OK
 & .\.venv\Scripts\python.exe prototypes\00_env_check.py
-
-# 1. the test suite — must exit 0 with 28/28 PASS
-& .\.venv\Scripts\python.exe prototypes\04_reprojection_math.py
-
-# 2. regenerate outputs/warppairs/ (invalidated in Phase 0) with repaired masks,
-#    then re-profile candidate B — writes rows to docs/benchmarks.md
-& .\.venv\Scripts\python.exe prototypes\03_inpaint_sd15_cn.py
-
-# 3. candidates A and C — now that the SDXL weights are present
-& .\.venv\Scripts\python.exe prototypes\02_inpaint_sdxl.py --variant inpaint
-& .\.venv\Scripts\python.exe prototypes\02_inpaint_sdxl.py --variant controlnet
-
-# 4. first real end-to-end image (has never been run in this project's history)
-& .\.venv\Scripts\python.exe prototypes\05_e2e_minimal.py --pipeline C
 ```
 
-Step 2 must precede step 3: `get_pairs()` regenerates the shared
-(warped, mask, cond) cache on first call, so whichever candidate runs first
-fixes the inputs for all of them. Run them in that order, or the benchmark rows
-will not be comparable.
+The script should finish with `ENVIRONMENT OK`. It reports individual checks and
+warnings if the CUDA device or expected precision support is unavailable.
 
-Steps 2-4 all append to `docs/benchmarks.md`. Do not hand-edit that file.
+## Download model weights
 
-See open blockers O1-O4 in `docs/decisions.md` for what these runs are meant to
-close.
+Weights are not tracked in Git. The default downloader stores them under the
+ignored `models/` directory. Download the active depth model family and selected
+SDXL inpainting model:
 
-## 7. Known platform facts discovered during validation
+```powershell
+& .\.venv\Scripts\python.exe scripts\download_models.py depth
+& .\.venv\Scripts\python.exe scripts\download_models.py inpaint_a
+```
 
-- Desktop baseline VRAM usage fluctuates (~420 MiB → ~1.6 GiB observed) with
-  open apps; treat 6.8 GiB as the hard ceiling for any single pipeline stage.
-- WDDM "CUDA sysmem fallback" status is probed by `_bench.deliberate_oom()`;
-  if it reports ACTIVE, real OOMs surface as extreme slowdowns instead of
-  exceptions. **This machine reported ACTIVE.** Recommended fix: disable
-  "CUDA System Memory Fallback" in NVIDIA Control Panel (Manage 3D settings).
-  Until that is done, the `except OutOfMemoryError` handlers cannot fire —
-  `openreframe/_watchdog.py` detects stalls by wall-clock instead and interrupts
-  the run. The exception handlers stay in place and take over once the toggle
-  is flipped. **Outstanding: the toggle has not been flipped.**
-- Driver 610.62 ships CUDA UMD 13.3 → any cu12x wheel works; cu124 chosen for
-  stability, not necessity.
-- `models/direct/` exists because hf-xet stalled during downloads.
-  `scripts/download_direct.py` bypasses xet with chunked Range-resume GETs.
-  Weights may live in either store; resolve with `config.local_or_repo()`.
-- All five weight sets required by every candidate are present and verified
-  loadable: Depth Anything V2 S/B/L (in `models/hub/`), SD1.5-inpaint +
-  SD1.5 depth-ControlNet (candidate B), SDXL-inpaint (A), SD1.5-inpaint +
-  SDXL depth-ControlNet (C). Use `--fp16-only` when downloading — every load
-  path passes `variant="fp16"`, so the fp32 copies are dead weight.
+The depth group downloads ViT-S, ViT-B, and ViT-L; the app uses ViT-L. The active
+inpainting backend is candidate A, SDXL inpainting without ControlNet. The
+`inpaint_b` and `inpaint_c` groups are optional research/comparison candidates,
+not required to run the app.
+
+If Hugging Face's large-file transport stalls, `scripts\download_direct.py`
+supports resumable direct downloads for the inpainting comparison set:
+
+```powershell
+& .\.venv\Scripts\python.exe scripts\download_direct.py inpaint_ac --fp16-only
+```
+
+That group includes the optional SDXL depth-ControlNet weights in addition to
+the active inpainting model. Weights can be stored in `models/hub/` or
+`models/direct/`; the application checks the direct-download location before
+falling back to the Hugging Face repository ID.
+
+## Run the application
+
+Start in preview-first mode:
+
+```powershell
+& .\.venv\Scripts\python.exe -m openreframe.server --host 127.0.0.1 --port 8000
+```
+
+Open <http://127.0.0.1:8000>. Upload a photograph, adjust the X, Y, and forward
+camera shifts, and inspect the geometry preview. Magenta regions mark areas to
+be filled. Select **Render final** to run diffusion. Add `--inpaint` to load the
+diffusion pipeline on a background thread at startup:
+
+```powershell
+& .\.venv\Scripts\python.exe -m openreframe.server --host 127.0.0.1 --port 8000 --inpaint
+```
+
+Models load lazily by default, so the health endpoint is available while model
+weights are loading. The first depth preview can take 10–60 seconds to load the
+depth model; later previews are faster. The app uses a single GPU worker and
+prioritizes queued previews over queued renders, but does not interrupt a render
+already in progress.
+
+The server binds to localhost by default. It has no authentication and keeps
+images and job results in memory only; do not expose it to an untrusted network.
+Uploads are limited to a 4096-pixel long side and the in-memory image store keeps
+up to 12 images.
+
+## Checks and profiling
+
+Run the reprojection check suite after setup:
+
+```powershell
+& .\.venv\Scripts\python.exe prototypes\04_reprojection_math.py
+```
+
+It should report **34/34 PASS**. The suite can run without a GPU. Depth profiling,
+diffusion probes, and `/api/reframe` require CUDA and the corresponding model
+weights. See `AGENTS.md` for the project validation rules. Benchmark records in
+`docs/benchmarks.md` are machine-generated and append-only; use the relevant
+probe rather than editing measured rows by hand.
+
+## Hardware notes
+
+- On the reference laptop, desktop applications use a variable amount of
+  dedicated VRAM. The benchmark ceiling is 6.8 GiB; other GPU workloads can
+  reduce available headroom.
+- Windows WDDM may fall back to system memory instead of raising a normal CUDA
+  out-of-memory exception. The time-based watchdog handles the observed
+  slowdown behavior; consult the latest status in `docs/decisions.md`.
+- Plug in a laptop before long renders to avoid power and thermal throttling.
+- Model downloads can take time and require several gigabytes per checkpoint.
