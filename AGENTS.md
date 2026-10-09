@@ -15,9 +15,10 @@ objects in the original shot. Local-only, targeting an **RTX 4060 Laptop with
 
 | File | Why |
 |---|---|
-| `docs/decisions.md` | Pre-registered rules, resolved decisions, **and the open blockers**. Source of truth for *why* any constant is what it is. |
+| `README.md` | User-facing overview and quick start. |
+| `docs/decisions.md` | Pre-registered rules, resolved decisions, historical findings, and current status; source of truth for *why* constants are what they are. |
 | `docs/benchmarks.md` | Append-only measurement log, machine-written. |
-| `docs/setup-windows.md` | The validated environment recipe. |
+| `docs/setup-windows.md` | Windows environment, model downloads, and run instructions. |
 
 ## Layout
 
@@ -27,7 +28,7 @@ openreframe/          <- shipped implementation
   config.py             frozen constants; each traces to a decision
   _warp.py              forward-splat reprojection  <- the core math
   _depth.py             Depth Anything V2 ViT-L + per-image depth cache
-  _inpaint.py           candidate B diffusion, cancellable
+  _inpaint.py           candidate A SDXL diffusion, cancellable
   _watchdog.py          time-based OOM stall detection
   pipeline.py           Reframer: preview / reframe
   server.py             FastAPI, single GPU worker + priority queue
@@ -106,7 +107,9 @@ and anything calling `/api/reframe`. Geometry and preview run on CPU.
 
 ## Current state — read before claiming anything works
 
-`docs/decisions.md` is the authoritative record. **D0.1 is closed** (R5):
+`docs/decisions.md` is the authoritative record. **D0.1 is closed** (R5;
+the later clarification at the end of the file supersedes the stale appended
+O1–O5 blocker section):
 candidate A is the shipped backend. Depth selection (R1) and the reprojection
 math (R2) are resolved. Three reprojection defects found during R4 were fixed in
 R5 and every candidate re-profiled — see that entry for the numbers.
@@ -115,15 +118,14 @@ Remaining known issues:
 
 - **`out04` residual foliage texture** — the weakest result in the set. Dense
   fine foliage against flat fog still shows a scribbled texture after inpainting.
-- **WDDM CUDA System Memory Fallback is still ACTIVE**, so `except
-  OutOfMemoryError` is dead code and real OOMs appear as slowdowns. Candidate C
-  is the standing demonstration (it exceeded dedicated VRAM and ran 18x over
-  budget instead of raising). `openreframe/_watchdog.py` catches this by
-  wall-clock instead. Disable the toggle in the NVIDIA Control Panel to make the
-  exception handlers live again.
-- `outputs/warppairs/` and `outputs/inpaint/*` were regenerated under R5, but
-  `05_e2e_minimal.py` has only ever been run for candidate A.
-- SD1.5 and SDXL weights are both present; `models/direct/` is ~13 GB.
+- WDDM CUDA System Memory Fallback was observed on the reference machine. Check
+  the current machine before relying on `OutOfMemoryError`; the watchdog also
+  detects stalls by wall-clock time.
+- The residual `out04` foliage texture remains the weakest result in the fixed
+  evaluation set. R5 end-to-end verification used candidate A.
+- Model weights and generated outputs are local-only, gitignored artifacts.
+  Follow `docs/setup-windows.md` to download weights; do not assume they exist
+  in a fresh checkout.
 
 ## Verification expectations
 
