@@ -470,3 +470,27 @@ never raises `OutOfMemoryError`. The exception handlers are retained and become
 effective once "CUDA System Memory Fallback" is disabled in the NVIDIA Control
 Panel — that toggle is still outstanding and was not performed here.
 
+---
+
+## Erratum — status of the appended O1–O5 findings (2026-10-10)
+
+The `OPEN — blockers that must be cleared before D0.1 can be closed` section
+above was written before the R5 results and appended afterward as historical
+material. Its statements that D0.1 remains open, that O1–O4 are unresolved, and
+that the suite lacks T11 are superseded by R5 and its evidence:
+
+- **D0.1 is closed.** Candidate A passed all three pre-registered gates and is
+  the shipped backend (R5).
+- **O1 and O2 are resolved** by the corrected pseudo-depth, mask cleanup, and
+  depth smoothing described in R5.
+- **O3 is resolved for the documented failure modes:** T11 was added, and the
+  reprojection suite now contains 34 checks (34/34 PASS).
+- **O4 is historical:** GPU access and profiling were completed for R5; the
+  R5 benchmark rows and end-to-end verification are recorded above.
+- **O5 remains an environment caveat, not a D0.1 blocker.** WDDM CUDA system
+  memory fallback was observed on the reference machine; the time-based
+  watchdog remains in place. Re-check the current machine's setting before
+  relying on CUDA out-of-memory exceptions.
+
+The earlier section is retained to preserve the append-only investigation
+record; use R5 and this erratum for current project status.
