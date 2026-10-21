@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 import torch
 
-from .config import FOV_H_DEG
+from .config import FOV_H_DEG, device
 
 EPS_Z = 1e-4
 
@@ -91,7 +91,7 @@ def forward_warp(rgb: torch.Tensor, z: torch.Tensor, K: np.ndarray,
       behind_frac, covered_frac, flow_med_px, flow_max_px
     """
     assert rgb.shape[0] == 3 and z.shape == rgb.shape[1:], "expect CHW"
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = device()
     H, W = z.shape
     fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
 

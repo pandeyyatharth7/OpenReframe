@@ -16,9 +16,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
-from pathlib import Path
 
-import numpy as np
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
@@ -81,11 +79,6 @@ class Store:
     def get_job(self, jid: str) -> Job | None:
         with self._lock:
             return self._jobs.get(jid)
-
-    def depth(self) -> int:
-        with self._lock:
-            n = len(self._imgs)
-        return n
 
 
 class Service:
