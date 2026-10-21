@@ -8,7 +8,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "prototypes"))
 
-from _bench import MODELS_DIR  # noqa: E402  (sets HF_HUB_CACHE env)
+import _bench  # noqa: E402,F401  (import side effect: sets HF_HUB_CACHE env)
 
 from huggingface_hub import snapshot_download  # noqa: E402
 

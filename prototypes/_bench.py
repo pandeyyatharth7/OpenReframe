@@ -135,11 +135,8 @@ class Bench:
 
     def finish(self, notes: str = "") -> None:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-        header_needed = BENCHMARKS_MD.exists()
         lines = []
-        if header_needed:
-            pass
-        else:
+        if not BENCHMARKS_MD.exists():
             lines.append("# Benchmarks — OpenReframe Sprint 0\n")
             lines.append("All values measured on the target machine. `torch_peak` = "
                          "max_memory_allocated / max_memory_reserved (MiB); `smi_peak` = "

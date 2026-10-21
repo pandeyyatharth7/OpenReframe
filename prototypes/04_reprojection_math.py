@@ -14,7 +14,6 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _reproj import (build_intrinsics, classify_holes, forward_warp,
                      fill_pseudo_depth, make_disocclusion_mask,
                      validate_warp)
