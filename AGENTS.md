@@ -39,9 +39,11 @@ prototypes/           <- Sprint-0 audit trail, NOT the product
   04_reprojection_math.py   THE TEST SUITE
 scripts/              model downloaders
 static/index.html     the web UI
-assets/test_images/   frozen 15-image eval set
+assets/test_images/   frozen 15-image eval set; don't rename or prune it. The
+                      6-image benchmark subset lives in config.EVAL_IMAGES and
+                      again in prototypes/_prepwarp.py — update both.
 outputs/              artifacts (gitignored)
-models/               weights (gitignored)
+models/               weights (gitignored; absent in a fresh checkout)
 ```
 
 ## Hard rules
@@ -49,13 +51,18 @@ models/               weights (gitignored)
 1. **Never add implementation to `prototypes/_reproj.py`.** It is a shim that
    re-exports `openreframe/_warp.py`. Edit `_warp.py`. This exists so the test
    suite validates the code that actually ships.
-2. **`prototypes/04_reprojection_math.py` is the test suite** (there is no
-   pytest). It exits non-zero on any failure. Run it after touching warp code
-   and require **34/34 PASS**.
+2. **`prototypes/04_reprojection_math.py` is the test suite** — there is no
+   pytest, and this suite is the only harness (don't add a framework unless
+   asked). One `[PASS]`/`[FAIL]` line per check, a trailing `N failure(s)`,
+   non-zero exit on any failure. It takes **no arguments**, so every run is the
+   full **33 checks**. Expect `33 [PASS]` / `0 failure(s)`. `README.md` says
+   "34/34" — that count is stale; the script's own output is authoritative.
 3. **The shipped backend is candidate A** — `diffusers/stable-diffusion-xl-1.0-inpainting-0.1`,
    no ControlNet, `CAP_PX = 1024`. Selected under D0.1 (see `docs/decisions.md`
    R5). Do not reintroduce the ControlNet conditioning path as the default:
    candidate C exceeds both the VRAM and latency gates on this hardware.
+   `_inpaint.py` still carries that branch, keyed off `config.BACKEND_CONTROLNET`
+   (currently `None`). Keep it `None`; the branch stays for re-profiling only.
 4. **`config.CANON_SHIFT`, `config.SEED`, `config.STEPS`, `config.GUIDANCE` are
    frozen.** They define the comparison protocol. Changing one invalidates every
    benchmark row recorded under it.
@@ -87,15 +94,33 @@ models/               weights (gitignored)
   exists because hf-xet stalled; `scripts/download_direct.py` works around it.
 - Reproducibility is a feature: the splat's tie-breaking is deterministic
   (`scatter_reduce(amin)` twice, lowest source index wins). Preserve that.
+- **No linter, formatter, type checker, or CI workflow exists.** Verification is
+  the reprojection suite plus `compileall`; don't assume a pipeline will catch a
+  mistake, and don't introduce `ruff`/`mypy`/`make` steps as part of a change.
+- `_depth.py` caches depth per image by content hash. A slider drag must cost one
+  splat, not a ViT-L forward pass — don't bypass that cache in the preview path.
+- PowerShell renders git/python stderr as a red `NativeCommandError` even on
+  success (`git switch`, pip progress bars). Judge commands by `$LASTEXITCODE`,
+  not by the colour.
+- Work lands through branches and PRs; `git log origin/main` shows the merged
+  pull requests. Local `main` can trail `origin/main`, so confirm a file is
+  current before trusting its contents.
 
 ## Running things
 
 ```powershell
+# cheap gate after any edit: syntax/import breakage, no GPU or weights needed
+& .\.venv\Scripts\python.exe -m compileall -q openreframe prototypes scripts
+
 # environment gate — must print ENVIRONMENT OK
 & .\.venv\Scripts\python.exe prototypes\00_env_check.py
 
-# THE test suite — must exit 0 with 0 failures
+# THE test suite — must exit 0 with 0 failures (no weights needed; GPU or CPU)
 & .\.venv\Scripts\python.exe prototypes\04_reprojection_math.py
+
+# one-image end-to-end proof, console only: depth -> warp -> inpaint
+# NOTE: defaults to --pipeline B; pass A to exercise the shipped backend
+& .\.venv\Scripts\python.exe prototypes\05_e2e_minimal.py --pipeline A
 
 # server (geometry preview works without the diffusion pipeline)
 & .\.venv\Scripts\python.exe -m openreframe.server --port 8000
@@ -107,12 +132,12 @@ and anything calling `/api/reframe`. Geometry and preview run on CPU.
 
 ## Current state — read before claiming anything works
 
-`docs/decisions.md` is the authoritative record. **D0.1 is closed** (R5;
-the later clarification at the end of the file supersedes the stale appended
-O1–O5 blocker section):
-candidate A is the shipped backend. Depth selection (R1) and the reprojection
-math (R2) are resolved. Three reprojection defects found during R4 were fixed in
-R5 and every candidate re-profiled — see that entry for the numbers.
+`docs/decisions.md` is the authoritative record. **D0.1 is closed** (R5) — the
+clarification at the end of that file supersedes the stale appended O1–O5
+blocker section. Candidate A is the shipped backend; depth selection (R1) and
+the reprojection math (R2) are resolved. Three reprojection defects found during
+R4 were fixed in R5 and every candidate re-profiled — see that entry for the
+numbers.
 
 Remaining known issues:
 
@@ -121,8 +146,9 @@ Remaining known issues:
 - WDDM CUDA System Memory Fallback was observed on the reference machine. Check
   the current machine before relying on `OutOfMemoryError`; the watchdog also
   detects stalls by wall-clock time.
-- The residual `out04` foliage texture remains the weakest result in the fixed
-  evaluation set. R5 end-to-end verification used candidate A.
+- R5 end-to-end verification used candidate A, while `05_e2e_minimal.py`
+  defaults to `--pipeline B` — a bare run exercises a backend that is no longer
+  shipped.
 - Model weights and generated outputs are local-only, gitignored artifacts.
   Follow `docs/setup-windows.md` to download weights; do not assume they exist
   in a fresh checkout.
@@ -136,6 +162,8 @@ Remaining known issues:
   T11 exists for exactly this reason — its two cases were both real bugs that
   the synthetic suite could not see.
 - Any change to generation settings: re-profile the affected candidate and let
-  `_bench.py` write the rows. Do not hand-write numbers.
+  `_bench.py` write the rows.
+- Anything in `server.py` is outside the suite's coverage: with the server
+  running (CPU is enough), check `/api/health` and one `/api/preview` round trip.
 - If GPU access is unavailable, say so and stop. Do not infer benchmark numbers
   and do not resolve a gate that was not measured.
