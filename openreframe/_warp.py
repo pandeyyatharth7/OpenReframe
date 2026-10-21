@@ -88,7 +88,8 @@ def forward_warp(rgb: torch.Tensor, z: torch.Tensor, K: np.ndarray,
     rgb: (3,H,W) float32; z: (H,W) float32 (same units for all axes);
     K: (3,3); C: camera-center offset in z-units. Returns dict with:
       warped (3,H,W), coverage (H,W) bool, warped_z (H,W),
-      behind_frac, covered_frac, flow_med_px, flow_max_px
+      behind_frac, covered_frac, out_of_frame_frac,
+      flow_med_px, flow_max_px
     """
     assert rgb.shape[0] == 3 and z.shape == rgb.shape[1:], "expect CHW"
     dev = device()
@@ -152,6 +153,10 @@ def forward_warp(rgb: torch.Tensor, z: torch.Tensor, K: np.ndarray,
     flow_max = fv.max().item() if fv.numel() else 0.0
 
     n_behind = bad.sum().item()
+    # Original-frame pixels that are in front of the new camera but land
+    # outside its frame. They are the content the move crops away, which is
+    # what the composition score needs to judge a shift.
+    n_oob = ((~bad) & (~inb)).sum().item()
     return dict(
         warped=out_rgb.view(H, W, 3).permute(2, 0, 1),
         coverage=hit.view(H, W),
@@ -159,6 +164,7 @@ def forward_warp(rgb: torch.Tensor, z: torch.Tensor, K: np.ndarray,
         winners=win_field.view(H, W).cpu(),
         behind_frac=n_behind / (H * W),
         covered_frac=hit.float().mean().item(),
+        out_of_frame_frac=n_oob / (H * W),
         flow_med_px=flow_med,
         flow_max_px=flow_max,
     )

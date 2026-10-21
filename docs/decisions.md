@@ -494,3 +494,131 @@ that the suite lacks T11 are superseded by R5 and its evidence:
 
 The earlier section is retained to preserve the append-only investigation
 record; use R5 and this erratum for current project status.
+
+---
+
+## V2 — Smart reframing, variants, quality metrics and recovery (2026-10-22)
+
+This entry records the V2 feature work. It **does not** reopen D0.1 and it does
+**not** change any frozen constant: `CANON_SHIFT`, `SEED`, `STEPS` and
+`GUIDANCE` are untouched, so every benchmark row recorded under them stays
+valid.
+
+### V2.1 What was added
+
+| Module | Responsibility |
+|---|---|
+| `openreframe/_smart.py` | Proposes camera movements and scores them geometrically. |
+| `openreframe/_quality.py` | Measures the quality of a generated image. |
+| `openreframe/_variants.py` | Runs one variant end to end and applies bounded recovery. |
+| `prototypes/06_v2_features.py` | Check suite for the three modules above (no weights, no GPU). |
+
+`Reframer` gained `depth_for()` (the already-cached pseudo-depth), `plan()`
+(geometry only) and `mask_dilate_px` on `reframe()`. `server.py` gained
+`/api/plan` and `/api/variants`; the job result now carries a report, a
+recovery log and the effective shift.
+
+### V2.2 Smart reframing is geometric, not semantic
+
+The planner crosses three magnitude tiers (0.5x, 1.0x, 1.7x the canonical
+shift) with five directions and scores every candidate from the warp it
+already has to compute. No detector was added: the repository has no object
+detector, so the planner makes no claim about subjects, and the UI reports
+subject preservation as *unavailable* rather than guessing.
+
+Candidates are always inside `MAX_SHIFT` (0.25) and never duplicated. The
+selection takes the best candidate of each tier first, so a set of three always
+spans the conservative/balanced/exploratory characters with genuinely different
+camera configurations.
+
+Scoring weights live in `_quality.STRATEGIES` and sum to 1.0 per strategy:
+
+| Factor | Meaning | preserve | balanced | explore |
+|---|---|---|---|---|
+| retention | share of the new frame that is original content | 0.45 | 0.35 | 0.20 |
+| exposure | penalty for the share the inpainter must invent | 0.35 | 0.30 | 0.25 |
+| crop | penalty for the share of the original that leaves the view | 0.15 | 0.20 | 0.10 |
+| spread | reward for a coherent rather than speckled invented area | 0.05 | 0.15 | 0.10 |
+| motion | reward for moving the camera at all | 0.00 | 0.00 | 0.35 |
+
+Planning costs one geometry-only warp per candidate (16 candidates, 2.4 s
+measured on a 960x1280 frame on the reference machine) and no additional model
+inference, because `DepthEstimator` already caches the depth map by image
+content.
+
+### V2.3 The quality metrics are measurements, not scores
+
+Four metrics are computed from the warped frame, the disocclusion mask and the
+generated image:
+
+- **Original-Region Preservation** — SSIM between the reprojected frame and the
+  output, restricted to the region outside the mask (plus a 5 px band, because
+  the SSIM window reaches across the seam). Comparing against the *reprojected*
+  frame rather than the original photograph is what makes the comparison valid
+  under camera movement.
+- **Boundary Consistency** — colour and gradient discontinuity across the mask
+  edge. A low value means a visible seam; it does **not** prove the content is
+  realistic, and the report says so.
+- **Expansion Coverage** — share of the missing area the generator replaced,
+  measured against the pre-inpaint placeholder. Replaced is not the same as
+  correct.
+- **Composition Score** — the geometric heuristic above.
+
+A metric that cannot be computed is reported with status *unavailable* and a
+null value. Nothing is back-filled with zero.
+
+Acceptance is **per metric** (`_quality.ACCEPT_FLOORS`: preservation 75,
+coverage 90, boundary 55), never a single aggregate, so a perfect expansion
+coverage cannot mask severe damage to the original image.
+
+### V2.4 Recovery is bounded and targeted
+
+At most one correction per variant by default (`_variants.run_variant`):
+
+| Detected problem | Correction |
+|---|---|
+| disocclusion above 20 % of the frame | camera move scaled by 0.6 |
+| unfilled regions | generation mask widened by 1 px, then re-rendered |
+| boundary score below its floor | feathered seam blend into the original |
+| preservation below its floor | the untouched region is restored from the reprojected frame |
+| stalled generation | one plain retry |
+| rejected configuration / undecodable image | no retry — the failure is deterministic |
+
+Corrections are split into *re-runs* (the inputs change and the image is
+generated again) and *post-fixes* (the existing image is corrected in place).
+
+Attempts are compared on their **raw** metrics, so a repaired attempt cannot
+outrank an attempt that never needed a repair; the repair is then applied to
+the winner. Ties are broken towards the attempt that invents less. A variant
+that fails is reported with its error and does not affect the other variants —
+they are separate jobs on the same queue.
+
+### V2.5 Verification performed
+
+- `prototypes/04_reprojection_math.py` — unchanged, still 0 failures. The only
+  change to `_warp.py` was the added `out_of_frame_frac` diagnostic (the share
+  of the original frame that the new camera no longer sees); the warp math is
+  byte-for-byte unchanged.
+- `prototypes/06_v2_features.py` — new, 0 failures. It covers candidate
+  bounds, duplicates, tier differences, missing optional arguments, coordinate
+  conventions, the four metrics, the unavailable-mask path, size mismatches,
+  mask exclusion, coverage, the recovery corrections, the retry limit, failure
+  isolation, the attempt selection, and the manual/smart/integration paths.
+  It mocks the model, so it needs neither weights nor a GPU.
+- Server, against the real SDXL backend on the reference machine: one preview,
+  one plan, three variants rendered sequentially (56.8 s total), and one
+  deliberate over-shift (0.25) which was detected as excessive disocclusion,
+  corrected to 0.15 and re-rendered.
+
+Measured on `mix05.jpg`, three variants: preservation 76.9–78.7, boundary
+64.0–76.2, coverage 100.0, composition 43.4–79.6. Subject preservation was
+reported as unavailable in every case, as designed.
+
+### V2.6 What V2 does not do
+
+- No output-aspect-ratio control; the render keeps the source aspect ratio.
+- No subject detection, so no subject-aware placement or preservation.
+- No semantic failure detection (duplicated objects, implausible fills).
+- The planner proposes camera moves; it does not search over inpainting
+  prompts or seeds, which stay frozen at `SEED = 0`.
+

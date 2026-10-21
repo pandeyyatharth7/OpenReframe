@@ -8,4 +8,4 @@ from __future__ import annotations
 from . import _paths  # noqa: F401  (side effect: HF cache redirection)
 
 __version__ = "0.1.0"
-__all__ = ["_paths", "config", "pipeline"]
+__all__ = ["_paths", "config", "pipeline", "_quality", "_smart", "_variants"]

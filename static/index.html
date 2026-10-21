@@ -8,6 +8,7 @@
   :root {
     --bg: #14161a; --panel: #1c1f25; --line: #2b3038; --text: #e8eaed;
     --muted: #9aa3af; --accent: #6ea8fe; --gap: #ff00ff; --bad: #ff6b6b;
+    --good: #6fcf97; --warn: #d8a13a;
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
@@ -33,6 +34,13 @@
   button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
   button.danger { background: var(--bad); color: #1a0d0d; }
   .stack { display: grid; gap: 8px; }
+  .tabs { display: flex; gap: 6px; }
+  .tabs button { flex: 1; background: transparent; color: var(--muted);
+                 border: 1px solid var(--line); font-weight: 500; }
+  .tabs button.on { background: var(--accent); color: #0d1117; border-color: var(--accent);
+                    font-weight: 600; }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 6px 8px; font-size: 13px; width: 140px; }
   .stage { position: relative; background: var(--panel); border: 1px solid var(--line);
            border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
   .stage img { display: block; width: 100%; height: auto; }
@@ -48,6 +56,34 @@
   .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
   kbd { background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
         padding: 0 4px; font-size: 11px; }
+  h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); margin: 22px 0 10px; }
+  .cand { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; align-items: center;
+          padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+          margin-bottom: 6px; font-size: 12px; }
+  .cand .cname { font-weight: 600; }
+  .cand .cmeta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .cand .cscore { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          overflow: hidden; display: flex; flex-direction: column; }
+  .card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .card > img { display: block; width: 100%; height: auto; background: #0d1014; }
+  .card .body { padding: 10px 11px 12px; display: grid; gap: 7px; }
+  .card .title { font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; }
+  .card .meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .metrics { font-size: 11px; display: grid; gap: 2px; color: var(--muted); }
+  .metrics b { color: var(--text); font-weight: 500; }
+  .metrics .v { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .metrics .na { color: var(--muted); font-style: italic; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btns button { padding: 5px 10px; font-size: 12px; font-weight: 500; }
+  .btns a { font-size: 12px; color: var(--text); text-decoration: none; border: 1px solid var(--line);
+            border-radius: 6px; padding: 5px 10px; }
+  .btns a:hover { border-color: var(--accent); color: var(--accent); }
+  .note { font-size: 11px; color: var(--warn); }
+  .err { font-size: 11px; color: var(--bad); }
+  .report { margin-top: 8px; font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -64,6 +100,15 @@
       <label>Source</label>
       <div class="drop" id="drop">Drop an image, or click to choose</div>
       <input type="file" id="file" accept="image/*" hidden />
+    </div>
+
+    <div class="group" id="modeGroup" style="display:none">
+      <label>Mode</label>
+      <div class="tabs">
+        <button id="mManual" class="on">Manual</button>
+        <button id="mSmart">Smart</button>
+      </div>
+      <div class="hint" id="modeHint">Drag the sliders to move the virtual camera.</div>
     </div>
 
     <div class="group" id="controls" style="display:none">
@@ -83,24 +128,59 @@
       <div id="bar"><div id="barfill"></div></div>
       <div id="msg"></div>
     </div>
+
+    <div class="group stack" id="smartPanel" style="display:none">
+      <label>Smart reframing</label>
+      <div class="row"><span>Variants</span>
+        <select id="nVar">
+          <option value="1">1</option><option value="2">2</option>
+          <option value="3" selected>3</option><option value="4">4</option>
+          <option value="5">5</option><option value="6">6</option>
+        </select></div>
+      <div class="row"><span>Strategy</span>
+        <select id="strategy">
+          <option value="preserve">Preserve composition</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="explore">Exploratory</option>
+        </select></div>
+      <button id="plan">Propose camera moves</button>
+      <div id="candList"></div>
+      <button id="genVars" disabled>Generate variants</button>
+      <div id="vbar"><div id="vbarfill"></div></div>
+      <div id="vmsg" class="hint"></div>
+    </div>
   </aside>
 
   <section>
     <div class="stage"><img id="iOrig" alt="source" /><div class="cap"><span>Source</span><span id="cOrig"></span></div></div>
     <div class="stage"><img id="iPrev" alt="preview" /><div class="cap"><span>Geometry preview <span style="color:var(--gap)">■</span> magenta = will be inpainted</span><span id="cPrev"></span></div></div>
-    <div class="stage" id="finalWrap" style="display:none"><img id="iFinal" alt="result" /><div class="cap"><span>Final (inpainted)</span><span id="cFinal"></span></div></div>
+    <div class="stage" id="finalWrap" style="display:none"><img id="iFinal" alt="result" /><div class="cap"><span>Final (inpainted)</span><span id="cFinal"></span></div>
+      <div class="report" id="finalReport"></div>
+      <div class="btns" style="padding:0 10px 10px"><a id="dlFinal" href="#" download>Download</a></div>
+    </div>
+
+    <div id="gridWrap" style="display:none">
+      <h3>Variants</h3>
+      <div class="grid" id="grid"></div>
+    </div>
   </section>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
 let imageId = null, previewJob = null, finalJob = null, pollTimer = null;
+let planJob = null, planData = null, mode = 'manual';
+let variants = [], selectedVariant = null;
 
 const shift = () => [+$('sX').value, +$('sY').value, +$('sF').value];
 
 function say(t, bad) {
   $('msg').textContent = t || '';
   $('msg').style.color = bad ? 'var(--bad)' : 'var(--muted)';
+}
+function vsay(t, bad) {
+  $('vmsg').textContent = t || '';
+  $('vmsg').style.color = bad ? 'var(--bad)' : 'var(--muted)';
 }
 
 async function health() {
@@ -132,11 +212,36 @@ async function upload(f) {
   imageId = j.image_id;
   $('iOrig').src = `/api/image/${imageId}`;
   $('cOrig').textContent = `${j.width}×${j.height}`;
-  $('controls').style.display = $('actions').style.display = '';
+  // the manual controls only belong to manual mode
+  const manual = mode === 'manual';
+  $('controls').style.display = manual ? '' : 'none';
+  $('actions').style.display = manual ? '' : 'none';
+  $('modeGroup').style.display = '';
   $('finalWrap').style.display = 'none';
+  $('gridWrap').style.display = 'none';
+  variants = []; selectedVariant = null; planData = null;
+  $('candList').innerHTML = '';
   say('image loaded — drag a slider for a geometry preview');
   requestPreview();
+  if (mode === 'smart') requestPlan();
 }
+
+/* ---------- mode ---------- */
+function setMode(m) {
+  const manual = m === 'manual';
+  mode = manual ? 'manual' : 'smart';
+  $('mManual').classList.toggle('on', manual);
+  $('mSmart').classList.toggle('on', !manual);
+  $('controls').style.display = manual ? '' : 'none';
+  $('actions').style.display = manual ? '' : 'none';
+  $('smartPanel').style.display = manual ? 'none' : '';
+  $('modeHint').textContent = manual
+    ? 'Drag the sliders to move the virtual camera.'
+    : 'The app proposes camera moves and scores them geometrically.';
+  if (!manual && imageId && !planData) requestPlan();
+}
+$('mManual').onclick = () => setMode('manual');
+$('mSmart').onclick = () => setMode('smart');
 
 /* ---------- preview ---------- */
 let debounce = null;
@@ -188,6 +293,16 @@ function poll(jid, kind) {
         `${s.stats.width}×${s.stats.height} · ${s.stats.steps_run}/${s.stats.total_steps} steps · ${s.stats.elapsed_s}s` +
         (s.stats.watchdog.tripped ? ' · OOM-suspected stall' : '');
       $('cFinal').style.color = s.stats.watchdog.tripped ? '#d8a13a' : 'var(--muted)';
+      $('dlFinal').href = s.images.filled + '?download=1';
+      $('finalReport').innerHTML = reportHtml(s.report) + recoveryHtml(s.recovery);
+      // the recovery may have pulled the camera back — show what was actually used
+      if (s.effective_shift && s.shift &&
+          s.effective_shift.some((v,i) => Math.abs(v - s.shift[i]) > 1e-4)) {
+        const e = s.effective_shift;
+        $('sX').value=e[0]; $('sY').value=e[1]; $('sF').value=e[2];
+        $('vX').textContent=e[0].toFixed(2); $('vY').textContent=e[1].toFixed(2);
+        $('vF').textContent=e[2].toFixed(2);
+      }
       $('bar').style.display = 'none'; $('go').disabled = false;
       $('cancel').disabled = true;
       say('done');
@@ -230,6 +345,251 @@ $('cancel').onclick = async () => {
   say('cancelling…');
   await fetch(`/api/jobs/${finalJob}/cancel`, { method: 'POST' });
 };
+
+/* ---------- smart: plan ---------- */
+$('plan').onclick = requestPlan;
+
+async function requestPlan() {
+  if (!imageId) return;
+  $('plan').disabled = true;
+  vsay('planning camera moves…');
+  const r = await fetch('/api/plan', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ image_id: imageId, count: +$('nVar').value,
+                           strategy: $('strategy').value })
+  });
+  if (!r.ok) { $('plan').disabled = false;
+               return vsay((await r.json()).detail || 'plan rejected', true); }
+  planJob = (await r.json()).job_id;
+  pollPlan(planJob);
+}
+
+async function pollPlan(jid) {
+  const s = await (await fetch(`/api/jobs/${jid}`)).json();
+  if (s.status === 'done') {
+    planData = s;
+    renderCandidates();
+    $('plan').disabled = false;
+    vsay(`${s.stats.count} candidates scored in ${s.stats.elapsed_s}s · strategy ${s.stats.strategy}`);
+  } else if (s.status === 'error') {
+    $('plan').disabled = false;
+    vsay(s.error, true);
+  } else {
+    vsay('planning…');
+    setTimeout(() => pollPlan(jid), 400);
+  }
+}
+
+function renderCandidates() {
+  const box = $('candList');
+  box.innerHTML = '';
+  for (const c of planData.candidates) {
+    const row = document.createElement('label');
+    row.className = 'cand';
+    const chk = document.createElement('input');
+    chk.type = 'checkbox'; chk.checked = true; chk.value = c.shift.join(',');
+    const mid = document.createElement('div');
+    mid.innerHTML = `<div class="cname">${c.label} · ${c.direction}</div>` +
+      `<div class="cmeta">X ${c.shift[0].toFixed(3)} · Y ${c.shift[1].toFixed(3)}` +
+      ` · F ${c.shift[2].toFixed(3)} — ${c.reason}</div>`;
+    const sc = document.createElement('div');
+    sc.className = 'cscore'; sc.textContent = c.score.toFixed(0);
+    row.append(chk, mid, sc);
+    box.appendChild(row);
+  }
+  $('genVars').disabled = false;
+}
+
+/* ---------- smart: variants ---------- */
+$('genVars').onclick = generateVariants;
+
+async function generateVariants() {
+  if (!imageId || !planData) return;
+  const picked = [...document.querySelectorAll('#candList input:checked')]
+    .map(i => i.value.split(',').map(Number));
+  if (!picked.length) return vsay('select at least one candidate', true);
+
+  const candidates = planData.candidates.filter(c =>
+    picked.some(p => p.join(',') === c.shift.join(',')));
+  variants = candidates.map(c => ({
+    job_id: null, label: c.label, direction: c.direction, shift: c.shift,
+    status: 'queued', images: null, report: null, recovery: null, error: null
+  }));
+  $('gridWrap').style.display = '';
+  $('genVars').disabled = true;
+  renderGrid();
+
+  const r = await fetch('/api/variants', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ image_id: imageId, candidates, strategy: $('strategy').value })
+  });
+  if (!r.ok) { $('genVars').disabled = false;
+               return vsay((await r.json()).detail || 'rejected', true); }
+  const j = await r.json();
+  j.jobs.forEach((jb, i) => { if (variants[i]) variants[i].job_id = jb.job_id; });
+  pollVariants();
+}
+
+async function pollVariants() {
+  const pending = variants.filter(v => v.job_id && v.status !== 'done' && v.status !== 'error');
+  if (!pending.length) { finishVariants(); return; }
+  let done = 0;
+  for (const v of variants) {
+    if (!v.job_id) continue;
+    const s = await (await fetch(`/api/jobs/${v.job_id}`)).json();
+    if (s.status === 'done') {
+      v.status = 'done'; v.images = s.images; v.report = s.report;
+      v.recovery = s.recovery; v.effective = s.effective_shift || s.shift;
+      done++;
+    } else if (s.status === 'error') {
+      v.status = 'error'; v.error = s.error;
+    } else if (s.status === 'cancelled') {
+      v.status = 'error'; v.error = 'cancelled';
+    } else if (s.progress && s.progress.total) {
+      v.progress = `${s.progress.step}/${s.progress.total}`;
+    }
+  }
+  renderGrid();
+  const active = variants.find(v => v.job_id && v.status !== 'done' && v.status !== 'error');
+  if (active) {
+    const idx = variants.indexOf(active) + 1;
+    vsay(`variant ${idx}/${variants.length}` + (active.progress ? ` — denoising ${active.progress}` : ' — queued'));
+    $('vbar').style.display = 'block';
+    $('vbarfill').style.width = (100 * done / variants.length) + '%';
+    setTimeout(pollVariants, 800);
+  } else {
+    finishVariants();
+  }
+}
+
+function finishVariants() {
+  $('vbar').style.display = 'none';
+  $('genVars').disabled = false;
+  const ok = variants.filter(v => v.status === 'done').length;
+  const bad = variants.filter(v => v.status === 'error');
+  vsay(`${ok}/${variants.length} variants generated` +
+       (bad.length ? ` · ${bad.length} failed` : ''), bad.length > 0);
+}
+
+function reportHtml(report) {
+  if (!report) return '';
+  const order = ['preservation', 'boundary', 'coverage', 'composition', 'subject'];
+  const lines = order.map(k => {
+    const m = report.metrics[k];
+    if (!m) return '';
+    const val = m.value === null || m.value === undefined
+      ? `<span class="na">not evaluated</span>`
+      : `<span class="v">${m.value.toFixed(1)}/100</span>`;
+    const mark = m.status === 'measured' ? '' :
+      ` <span class="na">(${m.status})</span>`;
+    return `<div><b>${m.name}:</b> ${val}${mark}</div>`;
+  });
+  return `<div class="metrics">${lines.join('')}</div>`;
+}
+
+function recoveryHtml(recovery) {
+  if (!recovery || !recovery.length) return '';
+  const rows = recovery.map(r => {
+    const bits = [];
+    if (r.problems && r.problems.length) bits.push(r.problems.join(', '));
+    if (r.correction) bits.push(`correction: ${r.correction}`);
+    if (r.note) bits.push(r.note);
+    if (!bits.length) return '';
+    return `<div>attempt ${r.attempt}: ${bits.join(' — ')}</div>`;
+  }).filter(Boolean);
+  if (!rows.length) return '';      // nothing went wrong, nothing to report
+  return `<div class="note" style="margin-top:6px">Recovery log</div>` +
+         `<div class="metrics">${rows.join('')}</div>`;
+}
+
+function renderGrid() {
+  const grid = $('grid');
+  grid.innerHTML = '';
+  for (const v of variants) {
+    const card = document.createElement('div');
+    card.className = 'card' + (selectedVariant === v ? ' sel' : '');
+    const img = document.createElement('img');
+    img.alt = v.label;
+    if (v.images && v.images.filled) img.src = v.images.filled + '?t=' + Date.now();
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.innerHTML = `<span>${v.label} · ${v.direction}</span>` +
+      `<span style="color:var(--accent)">${v.status}</span>`;
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const used = v.effective || v.shift;
+    meta.textContent = `X ${used[0].toFixed(3)} · Y ${used[1].toFixed(3)} · F ${used[2].toFixed(3)}`;
+
+    body.append(title, meta);
+    if (v.report) {
+      const rep = document.createElement('div');
+      rep.innerHTML = reportHtml(v.report);
+      body.appendChild(rep);
+    }
+    if (v.recovery && v.recovery.length) {
+      const rec = document.createElement('div');
+      rec.innerHTML = recoveryHtml(v.recovery);
+      if (rec.innerHTML) body.appendChild(rec);
+    }
+    if (v.error) {
+      const e = document.createElement('div');
+      e.className = 'err'; e.textContent = v.error;
+      body.appendChild(e);
+    }
+
+    const btns = document.createElement('div');
+    btns.className = 'btns';
+    const sel = document.createElement('button');
+    sel.className = 'ghost'; sel.textContent = 'Select';
+    sel.onclick = () => selectVariant(v);
+    const reg = document.createElement('button');
+    reg.className = 'ghost'; reg.textContent = 'Regenerate';
+    reg.onclick = () => regenerate(v);
+    btns.append(sel, reg);
+    if (v.images && v.images.filled) {
+      const dl = document.createElement('a');
+      dl.href = v.images.filled + '?download=1';
+      dl.textContent = 'Download';
+      btns.appendChild(dl);
+    }
+    body.appendChild(btns);
+    card.append(img, body);
+    grid.appendChild(card);
+  }
+}
+
+function selectVariant(v) {
+  selectedVariant = v;
+  if (v.images && v.images.filled) {
+    $('iFinal').src = v.images.filled + '?t=' + Date.now();
+    $('finalWrap').style.display = '';
+    $('dlFinal').href = v.images.filled + '?download=1';
+    $('cFinal').textContent = `${v.label} · ${v.direction}`;
+    $('finalReport').innerHTML = reportHtml(v.report) + recoveryHtml(v.recovery);
+  }
+  renderGrid();
+  vsay(`selected ${v.label} · ${v.direction}`);
+}
+
+async function regenerate(v) {
+  if (!imageId) return;
+  v.status = 'queued'; v.error = null; v.report = null; v.recovery = null;
+  v.images = null;
+  renderGrid();
+  const r = await fetch('/api/reframe', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ image_id: imageId, shift: v.shift, label: v.label,
+                           direction: v.direction })
+  });
+  if (!r.ok) { v.status = 'error'; v.error = (await r.json()).detail || 'rejected';
+               return renderGrid(); }
+  v.job_id = (await r.json()).job_id;
+  pollVariants();
+}
 </script>
 </body>
 </html>

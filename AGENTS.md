@@ -30,13 +30,17 @@ openreframe/          <- shipped implementation
   _depth.py             Depth Anything V2 ViT-L + per-image depth cache
   _inpaint.py           candidate A SDXL diffusion, cancellable
   _watchdog.py          time-based OOM stall detection
-  pipeline.py           Reframer: preview / reframe
+  _quality.py           quality metrics for a generated image (V2)
+  _smart.py             camera-movement planner + geometric scoring (V2)
+  _variants.py          variant orchestration + bounded recovery (V2)
+  pipeline.py           Reframer: preview / plan / reframe
   server.py             FastAPI, single GPU worker + priority queue
 prototypes/           <- Sprint-0 audit trail, NOT the product
   00..05_*.py           numbered probe scripts
   _bench.py             VRAM/time harness; appends to docs/benchmarks.md
   _reproj.py            RE-EXPORT SHIM onto openreframe/_warp.py
-  04_reprojection_math.py   THE TEST SUITE
+  04_reprojection_math.py   THE REPROJECTION TEST SUITE
+  06_v2_features.py         THE V2 TEST SUITE (planner / metrics / recovery)
 scripts/              model downloaders
 static/index.html     the web UI
 assets/test_images/   frozen 15-image eval set; don't rename or prune it. The
@@ -51,12 +55,15 @@ models/               weights (gitignored; absent in a fresh checkout)
 1. **Never add implementation to `prototypes/_reproj.py`.** It is a shim that
    re-exports `openreframe/_warp.py`. Edit `_warp.py`. This exists so the test
    suite validates the code that actually ships.
-2. **`prototypes/04_reprojection_math.py` is the test suite** — there is no
-   pytest, and this suite is the only harness (don't add a framework unless
-   asked). One `[PASS]`/`[FAIL]` line per check, a trailing `N failure(s)`,
-   non-zero exit on any failure. It takes **no arguments**, so every run is the
-   full **33 checks**. Expect `33 [PASS]` / `0 failure(s)`. `README.md` says
-   "34/34" — that count is stale; the script's own output is authoritative.
+2. **The check suites are `prototypes/04_reprojection_math.py` and
+   `prototypes/06_v2_features.py`** — there is no pytest, and these two scripts
+   are the only harness (don't add a framework unless asked). Both use the same
+   shape: one `[PASS]`/`[FAIL]` line per check, a trailing `N failure(s)`,
+   non-zero exit on any failure, and **no arguments**, so every run is the full
+   suite. `04` expects `33 [PASS]` / `0 failure(s)`; `06` expects
+   `51 [PASS]` / `0 failure(s)`. The scripts' own output is authoritative.
+   Neither needs weights or a GPU.
+
 3. **The shipped backend is candidate A** — `diffusers/stable-diffusion-xl-1.0-inpainting-0.1`,
    no ControlNet, `CAP_PX = 1024`. Selected under D0.1 (see `docs/decisions.md`
    R5). Do not reintroduce the ControlNet conditioning path as the default:
@@ -115,8 +122,11 @@ models/               weights (gitignored; absent in a fresh checkout)
 # environment gate — must print ENVIRONMENT OK
 & .\.venv\Scripts\python.exe prototypes\00_env_check.py
 
-# THE test suite — must exit 0 with 0 failures (no weights needed; GPU or CPU)
+# THE reprojection suite — must exit 0 with 0 failures (no weights needed)
 & .\.venv\Scripts\python.exe prototypes\04_reprojection_math.py
+
+# THE V2 suite — must exit 0 with 0 failures (no weights needed; mocks the model)
+& .\.venv\Scripts\python.exe prototypes\06_v2_features.py
 
 # one-image end-to-end proof, console only: depth -> warp -> inpaint
 # NOTE: defaults to --pipeline B; pass A to exercise the shipped backend
@@ -163,7 +173,12 @@ Remaining known issues:
   the synthetic suite could not see.
 - Any change to generation settings: re-profile the affected candidate and let
   `_bench.py` write the rows.
+- Any change to the planner, the quality metrics or the recovery logic:
+  `06_v2_features.py` green, plus a new check if behaviour changed. The V2
+  suite mocks the model, so keep it that way — a check that needs weights or a
+  GPU does not belong there.
 - Anything in `server.py` is outside the suite's coverage: with the server
   running (CPU is enough), check `/api/health` and one `/api/preview` round trip.
+  The V2 endpoints (`/api/plan`, `/api/variants`) are also outside it.
 - If GPU access is unavailable, say so and stop. Do not infer benchmark numbers
   and do not resolve a gate that was not measured.
