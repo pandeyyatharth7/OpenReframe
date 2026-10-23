@@ -1,0 +1,26 @@
+{
+  "name": "openreframe",
+  "version": "1.0.0",
+  "description": "OpenReframe turns a single photograph into a gently reframed, depth-aware view.\r It estimates relative depth, moves the virtual camera, reprojects visible\r surfaces, and fills regions revealed behind objects with an inpainting model.\r The local web app lets you preview the geometry before generating a final image.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pandeyyatharth7/OpenReframe.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/pandeyyatharth7/OpenReframe/issues"
+  },
+  "homepage": "https://github.com/pandeyyatharth7/OpenReframe#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5"
+  }
+}
