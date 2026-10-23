@@ -28,6 +28,11 @@ FOV_H_DEG = 55.0
 # the product (users want subtle parallax). See docs/decisions.md R5.
 CANON_SHIFT = (0.06, -0.02, 0.04)   # frozen eval shift; do not edit post-hoc
 
+# Largest camera offset the pipeline accepts, in units of median scene depth.
+# ~4x the canonical shift; beyond this the disocclusion masks stop being
+# fillable by the inpainter.
+MAX_SHIFT = 0.25
+
 # Edge-preserving smoothing of the relative-depth map before reprojection.
 # Leaf- and branch-scale depth noise is what creates the thousands of tiny
 # isolated disocclusions that a diffusion model fills with one flat blob each

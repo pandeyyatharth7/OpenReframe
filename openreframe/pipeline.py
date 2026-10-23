@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 import time
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -19,10 +20,12 @@ from PIL import Image
 from . import config
 from ._depth import DepthEstimator, rgb_to_tensor
 from ._inpaint import GenerationCancelled, Inpainter
+from ._quality import evaluate, mask_concentration, motion_ratio
+from ._smart import plan_candidates
 from ._warp import (build_intrinsics, forward_warp_full,
                     render_preview_with_gaps, slider_to_center, validate_warp)
 
-MAX_SHIFT = 0.25   # ~4x the canonical shift; beyond this masks stop being fillable
+MAX_SHIFT = config.MAX_SHIFT
 
 
 def _to_u8(t: torch.Tensor) -> np.ndarray:
@@ -72,7 +75,12 @@ class Reframer:
         return h
 
     # -- shared front half -------------------------------------------------
-    def _depth_for(self, img: Image.Image) -> torch.Tensor:
+    def depth_for(self, img: Image.Image) -> torch.Tensor:
+        """Pseudo-depth for an image, served from the estimator's cache.
+
+        The cache is keyed by image content, so a slider drag or a candidate
+        plan costs a splat, not another ViT-L forward pass.
+        """
         self.depth.load()
         return self.depth.pseudo_z(img)
 
@@ -104,7 +112,7 @@ class Reframer:
             raise ValueError(f"shift out of range (max |component| = {MAX_SHIFT})")
         t0 = time.perf_counter()
         with self._gpu_lock:
-            z = self._depth_for(img)
+            z = self.depth_for(img)
             res = self._warp(img, z, shift)
         elapsed = time.perf_counter() - t0
         warped_u8 = _to_u8(res["warped_filled"])
@@ -124,35 +132,81 @@ class Reframer:
             },
         }
 
+    def plan(self, img: Image.Image, count: int = 3,
+             strategy: str = "balanced") -> dict:
+        """Propose and rank camera movements. Geometry only, no diffusion.
+
+        Reuses the cached depth map, so planning costs one warp per candidate
+        and no additional model inference.
+        """
+        t0 = time.perf_counter()
+        with self._gpu_lock:
+            z = self.depth_for(img)
+            rgb = rgb_to_tensor(img)
+            # Score every candidate once, then pick the ones to generate from
+            # that ranking.
+            plan = plan_candidates(rgb, z, count=count, strategy=strategy)
+        return {
+            "candidates": plan["candidates"],
+            "ranking": plan["ranking"],
+            "stats": {"count": len(plan["candidates"]), "strategy": strategy,
+                      "elapsed_s": round(time.perf_counter() - t0, 3)},
+        }
+
     def reframe(self, img: Image.Image, shift: tuple[float, float, float],
                 on_step=None, cancel: threading.Event | None = None,
-                watchdog_enabled: bool = True) -> dict:
+                watchdog_enabled: bool = True,
+                mask_dilate_px: int = 0) -> dict:
         """Full chain: depth -> warp -> conditioned inpainting."""
         if max(abs(s) for s in shift) > MAX_SHIFT:
             raise ValueError(f"shift out of range (max |component| = {MAX_SHIFT})")
         with self._gpu_lock:
-            z = self._depth_for(img)
+            z = self.depth_for(img)
             res = self._warp(img, z, shift)
             nw, nh = config.fit_resolution(img.size[0], img.size[1], config.CAP_PX)
             warped, mask, cond = self._triplet(res, nw, nh)
+            if mask_dilate_px > 0:
+                # Widening the mask hands the seam ring to the inpainter
+                # instead of leaving the nearest-valid placeholder there.
+                # The VAE sees the mask at 1/8 resolution, so the widening has
+                # to be several pixels to survive the downscale.
+                grown = cv2.dilate((np.asarray(mask) > 127).astype(np.uint8),
+                                   np.ones((3, 3), np.uint8),
+                                   iterations=mask_dilate_px)
+                mask = Image.fromarray((grown * 255).astype(np.uint8))
             self.inpaint.load()
             gen = self.inpaint.generate(
                 warped, mask, cond, nw, nh, on_step=on_step, cancel=cancel,
                 watchdog_enabled=watchdog_enabled)
         hole_pct = float((np.asarray(mask) > 127).mean()) * 100.0
+        # The geometric facts the composition score is built from.
+        geom = {
+            "exposure_frac": hole_pct / 100.0,
+            "retention": float(res["covered_frac"]),
+            "crop_frac": float(res.get("out_of_frame_frac", 0.0)),
+            "spread": mask_concentration(mask),
+            "motion": motion_ratio(shift),
+        }
+        stats = {
+            "hole_pct": round(hole_pct, 1),
+            "width": gen["width"], "height": gen["height"],
+            "steps_run": gen["steps_run"], "total_steps": gen["total_steps"],
+            "elapsed_s": gen["elapsed_s"], "watchdog": gen["watchdog"],
+            "cancelled": False,
+            "covered_frac": round(float(res["covered_frac"]), 4),
+            "crop_pct": round(float(res.get("out_of_frame_frac", 0.0)) * 100, 1),
+            "seed": config.SEED,
+        }
+        report = evaluate(warped, gen["image"], mask, geom)
         return {
             "filled": gen["image"],
             "warped": warped,
             "mask": mask,
             "overlay": Image.fromarray(render_preview_with_gaps(
                 res["warped_filled"], res["mask"])),
-            "stats": {
-                "hole_pct": round(hole_pct, 1),
-                "width": gen["width"], "height": gen["height"],
-                "steps_run": gen["steps_run"], "total_steps": gen["total_steps"],
-                "elapsed_s": gen["elapsed_s"], "watchdog": gen["watchdog"],
-                "cancelled": False,
-            },
+            "stats": stats,
+            "geom": geom,
+            "report": report,
         }
 
 

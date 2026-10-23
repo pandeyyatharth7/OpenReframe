@@ -16,9 +16,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from heapq import heappop, heappush
-from pathlib import Path
 
-import numpy as np
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +24,8 @@ from PIL import Image
 
 from . import __version__, config
 from ._inpaint import GenerationCancelled
+from ._smart import DEFAULT_VARIANTS, MAX_VARIANTS
+from ._variants import VariantSpec, run_variant
 from .pipeline import MAX_SHIFT, Reframer
 
 PRIO_PREVIEW, PRIO_REFRAME = 0, 1
@@ -42,9 +42,11 @@ def _png(img: Image.Image) -> bytes:
 @dataclass
 class Job:
     id: str
+    kind: str                             # preview | reframe | plan
     shift: tuple[float, float, float]
     image_id: str = ""
-    status: str = "queued"          # queued|running|done|error|cancelled
+    payload: dict = field(default_factory=dict)
+    status: str = "queued"                # queued|running|done|error|cancelled
     progress: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
@@ -82,11 +84,6 @@ class Store:
         with self._lock:
             return self._jobs.get(jid)
 
-    def depth(self) -> int:
-        with self._lock:
-            n = len(self._imgs)
-        return n
-
 
 class Service:
     """Owns the Reframer and the single worker thread."""
@@ -115,18 +112,32 @@ class Service:
                              name="warmup").start()
 
     def submit_preview(self, iid: str, shift: tuple[float, float, float]) -> Job:
-        job = Job(id=uuid.uuid4().hex[:12], shift=shift, image_id=iid,
-                  status="queued")
+        job = Job(id=uuid.uuid4().hex[:12], kind="preview", shift=shift,
+                  image_id=iid, status="queued")
         self.store.put_job(job)
         self._push(PRIO_PREVIEW, job)
         return job
 
-    def submit_reframe(self, iid: str, shift: tuple[float, float, float]) -> Job:
-        job = Job(id=uuid.uuid4().hex[:12], shift=shift, image_id=iid,
-                  status="queued")
+    def submit_reframe(self, iid: str, shift: tuple[float, float, float],
+                       label: str = "Manual", strategy: str = "balanced",
+                       direction: str = "") -> Job:
+        job = Job(id=uuid.uuid4().hex[:12], kind="reframe", shift=shift,
+                  image_id=iid, status="queued",
+                  payload={"label": label, "strategy": strategy,
+                           "direction": direction})
         self.store.put_job(job)
         self._push(PRIO_REFRAME, job)
         return job
+
+    def submit_plan(self, iid: str, count: int = DEFAULT_VARIANTS,
+                    strategy: str = "balanced") -> Job:
+        job = Job(id=uuid.uuid4().hex[:12], kind="plan", shift=(0.0, 0.0, 0.0),
+                  image_id=iid, status="queued",
+                  payload={"count": count, "strategy": strategy})
+        self.store.put_job(job)
+        self._push(PRIO_REFRAME, job)
+        return job
+
 
     def _push(self, prio: int, job: Job) -> None:
         with self._cv:
@@ -163,25 +174,58 @@ class Service:
             return
 
         job.status = "running"
+        if job.kind == "plan":
+            out = self.reframer.plan(
+                img, count=int(job.payload.get("count", DEFAULT_VARIANTS)),
+                strategy=str(job.payload.get("strategy", "balanced")))
+            job.result = {"kind": "plan", "candidates": out["candidates"],
+                          "ranking": out["ranking"], "stats": out["stats"]}
+            job.status = "done"
+            return
+
         if is_preview:
             out = self.reframer.preview(img, job.shift)
-            job.result = {"kind": "preview", "warped": _png(out["warped"]),
-                          "mask": _png(out["mask"]),
-                          "overlay": _png(out["overlay"]),
+            job.result = {"kind": "preview",
+                          "images": {"warped": _png(out["warped"]),
+                                     "mask": _png(out["mask"]),
+                                     "overlay": _png(out["overlay"])},
                           "stats": out["stats"]}
             job.status = "done"
-        else:
-            def on_step(i: int, total: int) -> None:
-                job.progress["step"] = i
-                job.progress["total"] = total
+            return
 
-            out = self.reframer.reframe(img, job.shift, on_step=on_step,
-                                        cancel=job.cancel)
-            job.result = {"kind": "reframe", "filled": _png(out["filled"]),
-                          "overlay": _png(out["overlay"]),
-                          "mask": _png(out["mask"]),
-                          "stats": out["stats"]}
-            job.status = "done"
+        def on_step(i: int, total: int) -> None:
+            job.progress["step"] = i
+            job.progress["total"] = total
+
+        spec = VariantSpec(label=str(job.payload.get("label", "Manual")),
+                            shift=job.shift,
+                            strategy=str(job.payload.get("strategy", "balanced")),
+                            direction=str(job.payload.get("direction", "")))
+        variant = run_variant(self.reframer, img, spec, on_step=on_step,
+                              cancel=job.cancel)
+
+        if variant.error or variant.filled is None:
+            job.status = "error"
+            job.error = variant.error or "variant produced no image"
+            job.result = {"kind": "reframe", "images": {},
+                          "recovery": variant.recovery,
+                          "shift": list(job.shift),
+                          "effective_shift": list(variant.effective_shift),
+                          "label": variant.label}
+            return
+
+        job.result = {"kind": "reframe",
+                      "images": {"filled": _png(variant.filled),
+                                 "mask": _png(variant.mask),
+                                 "overlay": _png(variant.overlay)},
+                      "stats": variant.stats,
+                      "report": variant.report,
+                      "recovery": variant.recovery,
+                      "shift": list(job.shift),
+                      "effective_shift": list(variant.effective_shift),
+                      "label": variant.label,
+                      "direction": variant.direction}
+        job.status = "done"
 
 
 def create_app(svc: Service | None = None, warm: bool = False) -> FastAPI:
@@ -237,8 +281,52 @@ def create_app(svc: Service | None = None, warm: bool = False) -> FastAPI:
         shift = tuple(float(x) for x in payload.get("shift", (0, 0, 0)))
         if len(shift) != 3 or max(abs(s) for s in shift) > MAX_SHIFT:
             raise HTTPException(400, f"shift must be 3 floats within +/-{MAX_SHIFT}")
-        job = service.submit_reframe(iid, shift)
+        job = service.submit_reframe(
+            iid, shift, label=str(payload.get("label", "Manual")),
+            strategy=str(payload.get("strategy", "balanced")),
+            direction=str(payload.get("direction", "")))
         return {"job_id": job.id}
+
+    @app.post("/api/plan")
+    def plan(payload: dict = Body(...)) -> dict:
+        """Propose camera movements for the uploaded image. Geometry only."""
+        iid = payload.get("image_id")
+        count = int(payload.get("count", DEFAULT_VARIANTS))
+        if not 1 <= count <= MAX_VARIANTS:
+            raise HTTPException(400, f"count must be between 1 and {MAX_VARIANTS}")
+        strategy = str(payload.get("strategy", "balanced"))
+        job = service.submit_plan(iid, count=count, strategy=strategy)
+        return {"job_id": job.id}
+
+    @app.post("/api/variants")
+    def variants(payload: dict = Body(...)) -> dict:
+        """Queue one job per candidate so the variants run one after another.
+
+        Each job is an ordinary reframe job, so previews still take priority
+        over the queue and a variant that fails leaves the others untouched.
+        """
+        iid = payload.get("image_id")
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise HTTPException(400, "candidates must be a non-empty list")
+        if len(candidates) > MAX_VARIANTS:
+            raise HTTPException(400, f"at most {MAX_VARIANTS} variants")
+        strategy = str(payload.get("strategy", "balanced"))
+        jobs = []
+        for cand in candidates:
+            shift = tuple(float(x) for x in cand.get("shift", (0, 0, 0)))
+            if len(shift) != 3 or max(abs(s) for s in shift) > MAX_SHIFT:
+                raise HTTPException(
+                    400, f"shift must be 3 floats within +/-{MAX_SHIFT}")
+            job = service.submit_reframe(
+                iid, shift, label=str(cand.get("label", "Variant")),
+                strategy=str(cand.get("strategy", strategy)),
+                direction=str(cand.get("direction", "")))
+            jobs.append({"job_id": job.id, "label": job.payload["label"],
+                         "direction": job.payload["direction"],
+                         "shift": list(shift)})
+        return {"jobs": jobs}
+
 
     @app.get("/api/jobs/{jid}")
     def job_status(jid: str) -> dict:
@@ -249,12 +337,26 @@ def create_app(svc: Service | None = None, warm: bool = False) -> FastAPI:
                "progress": dict(job.progress),
                "elapsed_s": round(time.perf_counter() - job.created_s, 2)}
         if job.status == "done" and job.result:
-            r = dict(job.result)
-            stats = r.pop("stats", {})
-            r.pop("kind", None)
-            out["stats"] = stats
-            out["images"] = {k: f"/api/result/{job.id}/{k}" for k in r}
+            r = job.result
+            out["kind"] = r.get("kind")
+            out["stats"] = r.get("stats", {})
+            out["images"] = {k: f"/api/result/{job.id}/{k}"
+                             for k in r.get("images", {})}
+            if "candidates" in r:
+                out["candidates"] = r["candidates"]
+                out["ranking"] = r.get("ranking", [])
+            if "report" in r:
+                out["report"] = r["report"]
+            if "recovery" in r:
+                out["recovery"] = r["recovery"]
+            if "shift" in r:
+                out["shift"] = r["shift"]
+            if "effective_shift" in r:
+                out["effective_shift"] = r["effective_shift"]
+            if "label" in r:
+                out["label"] = r["label"]
         return out
+
 
     @app.post("/api/jobs/{jid}/cancel")
     def cancel(jid: str) -> dict:
@@ -265,14 +367,22 @@ def create_app(svc: Service | None = None, warm: bool = False) -> FastAPI:
         return {"id": jid, "cancel_requested": True}
 
     @app.get("/api/result/{jid}/{kind}")
-    def result(jid: str, kind: str) -> Response:
+    def result(jid: str, kind: str, download: bool = False) -> Response:
         job = service.store.get_job(jid)
         if job is None or job.status != "done" or not job.result:
             raise HTTPException(404, "no result for that job")
-        blob = job.result.get(kind)
+        blob = (job.result.get("images") or {}).get(kind)
         if blob is None:
             raise HTTPException(404, f"job has no '{kind}' image")
-        return Response(blob, media_type="image/png")
+        if not download:
+            return Response(blob, media_type="image/png")
+        shift = job.result.get("effective_shift") or job.result.get("shift")
+        label = job.result.get("label") or "variant"
+        suffix = "".join(f"{v:+.2f}".replace(".", "p") for v in (shift or []))
+        name = f"openreframe_{label.replace(' ', '_').lower()}_{suffix}.png"
+        return Response(blob, media_type="image/png",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
 
     static_dir = config._paths.STATIC_DIR
     if static_dir.is_dir():

@@ -94,7 +94,7 @@ class DepthEstimator:
     def warm(self, img: Image.Image, runs: int = 1) -> float:
         """Run `runs` warm-up inferences and return the last latency in ms.
 
-    The first call pays cuDNN/kernel autotune; R1's 119 ms warm p95 only holds
+        The first call pays cuDNN/kernel autotune; R1's 119 ms warm p95 only holds
         after warm-up, so the UI should call this once on image load.
         """
         import time

@@ -15,7 +15,6 @@ import torch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _bench  # noqa: F401
 from _bench import OUTPUTS_DIR, Bench
 from _prepwarp import (GUIDANCE, NEGATIVE_PROMPT, NEUTRAL_PROMPT, SEED,
                        STEPS, local_or_repo)
@@ -116,13 +115,12 @@ def main() -> int:
                         ).save(OUT / "warped_gaps.png")
 
     nw, nh = fit(w, h, CAPS[a.pipeline])
-    to_pil = lambda t8: Image.fromarray(t8)
-    warped_pil = to_pil((res["warped_filled"].clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)).resize((nw, nh), Image.LANCZOS)
+    warped_pil = Image.fromarray((res["warped_filled"].clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)).resize((nw, nh), Image.LANCZOS)
     mask_pil = Image.fromarray(mask).resize((nw, nh), Image.NEAREST)
     cond_np = res["dense_z"].numpy()
     lo, hi = np.percentile(cond_np, 2), np.percentile(cond_np, 98)
-    cond_pil = to_pil((np.clip((cond_np - lo) / max(hi - lo, 1e-6), 0, 1) * 255
-                       ).astype(np.uint8)).resize((nw, nh), Image.BILINEAR)
+    cond_pil = Image.fromarray((np.clip((cond_np - lo) / max(hi - lo, 1e-6), 0, 1) * 255
+                                ).astype(np.uint8)).resize((nw, nh), Image.BILINEAR)
 
     with bench.stage("load_inpaint"):
         pipe = build(a.pipeline)
